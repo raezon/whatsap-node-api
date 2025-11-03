@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "body-parser": "^2.2.0",
+    "express": "^5.1.0",
+    "puppeteer": "^24.25.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.34.1"
+  }
+}
