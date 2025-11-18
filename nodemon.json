@@ -1,0 +1,5 @@
+{
+  "watch": ["index.js", "client.js"],
+  "ignore": ["sessions/*", "uploads/*", "node_modules/*"],
+  "ext": "js,json"
+}
