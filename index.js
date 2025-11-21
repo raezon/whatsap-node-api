@@ -273,18 +273,16 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
   }
 });
 
-// 2️⃣ RÉCUPÉRER TOUS LES NUMÉROS D'UN USER (ses sessions WhatsApp)
-// 2️⃣ RÉCUPÉRER TOUS LES NUMÉROS D'UN USER (version finale)
+/* The above code is an Express route handler that handles GET requests to retrieve phone sessions for
+a specific user ID. Here is a breakdown of what the code does: */
 app.get("/user/:userId/phones", async (req, res) => {
   const { userId } = req.params;
   console.log(`📞 Recherche sessions pour user ${userId}`);
 
   try {
-    // 1. Scanner TOUTES les sessions sur le disque
     const allSessionsOnDisk = scanAllSessions();
     console.log(`💾 ${allSessionsOnDisk.length} sessions trouvées sur disque`);
 
-    // 2. Filtrer les sessions de cet utilisateur
     const userSessionsOnDisk = allSessionsOnDisk.filter((session) =>
       session.phoneNumber.includes(`user_${userId}_`)
     );
@@ -293,26 +291,38 @@ app.get("/user/:userId/phones", async (req, res) => {
       `🎯 ${userSessionsOnDisk.length} sessions pour user ${userId} sur disque`
     );
 
-    // 3. Charger les sessions en mémoire et récupérer leur statut
     const finalSessions = [];
 
     for (const session of userSessionsOnDisk) {
       try {
         console.log(`🔄 Traitement session: ${session.phoneNumber}`);
 
-        // Charger la session en mémoire si nécessaire
         if (!session.existsInMemory) {
           console.log(`📥 Chargement ${session.phoneNumber} en mémoire...`);
           await generateNewQR(session.phoneNumber);
-          // Attendre un peu pour l'initialisation
           await new Promise((resolve) => setTimeout(resolve, 2000));
         }
 
-        // Récupérer le statut actuel
         const currentStatus = getSenderStatus(session.phoneNumber);
+
+        // 🆕 CORRECTION: Utiliser client.info instead of client.getMe()
+        let realPhoneNumber = null;
+        try {
+          const { clientManager } = require("./client");
+          const client = clientManager.clients.get(session.phoneNumber);
+          if (client && currentStatus.ready && client.info) {
+            realPhoneNumber = client.info.wid.user;
+            console.log(`📱 Vrai numéro détecté: ${realPhoneNumber}`);
+          }
+        } catch (error) {
+          console.log(
+            `⚠️ Impossible de récupérer le vrai numéro: ${error.message}`
+          );
+        }
 
         finalSessions.push({
           phone_number: session.phoneNumber,
+          real_phone_number: realPhoneNumber, // 🆕
           status: currentStatus.status,
           ready: currentStatus.ready,
           authenticated: currentStatus.authenticated,
@@ -323,16 +333,18 @@ app.get("/user/:userId/phones", async (req, res) => {
         });
 
         console.log(
-          `✅ ${session.phoneNumber} - Statut: ${currentStatus.status}`
+          `✅ ${session.phoneNumber} - Statut: ${
+            currentStatus.status
+          } - Vrai: ${realPhoneNumber || "Non détecté"}`
         );
       } catch (sessionError) {
         console.error(
           `❌ Erreur sur ${session.phoneNumber}:`,
           sessionError.message
         );
-        // Inclure même les sessions en erreur
         finalSessions.push({
-          phone_number: session.phoneNumber,
+          phone_number: realPhoneNumber , // 🆕 Utilise le vrai numéro si disponible
+          real_phone_number: realPhoneNumber,
           status: "error",
           ready: false,
           authenticated: false,
@@ -344,7 +356,6 @@ app.get("/user/:userId/phones", async (req, res) => {
         });
       }
 
-      // Petite pause entre les sessions
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
@@ -352,12 +363,14 @@ app.get("/user/:userId/phones", async (req, res) => {
       `✅ ${finalSessions.length} sessions traitées pour user ${userId}`
     );
 
-    // 4. Statistiques
     const readySessions = finalSessions.filter(
       (s) => s.ready && s.authenticated
     );
     const qrSessions = finalSessions.filter((s) => s.hasQR && !s.ready);
     const errorSessions = finalSessions.filter((s) => s.status === "error");
+    const sessionsWithRealNumber = finalSessions.filter(
+      (s) => s.real_phone_number
+    );
 
     res.json({
       success: true,
@@ -367,6 +380,7 @@ app.get("/user/:userId/phones", async (req, res) => {
         ready_sessions: readySessions.length,
         qr_sessions: qrSessions.length,
         error_sessions: errorSessions.length,
+        sessions_with_real_number: sessionsWithRealNumber.length,
       },
       sessions: finalSessions,
       ready_sessions: readySessions,
@@ -384,63 +398,22 @@ app.get("/user/:userId/phones", async (req, res) => {
     });
   }
 });
-
 // 7️⃣ ENVOYER MESSAGE (version corrigée)
+// 7️⃣ ENVOYER MESSAGE (version ultra-simplifiée)
 app.post("/send", async (req, res) => {
   const { to, text, attachments, from } = req.body;
 
-  console.log(`📤 Tentative d'envoi depuis ${from} vers ${to}`);
+  console.log(`📤 Envoi depuis ${from} vers ${to}`);
 
-  if (!to) {
-    return res.status(400).json({ error: "Numéro destinataire requis" });
-  }
-
-  if (!from) {
-    return res.status(400).json({ error: "Numéro expéditeur requis" });
+  if (!to || !from) {
+    return res.status(400).json({
+      error: "Numéro expéditeur et destinataire requis",
+    });
   }
 
   try {
-    // 🆕 VÉRIFICATION RENFORCÉE DE LA CONNEXION
-    console.log(`🔍 Vérification connexion pour ${from}`);
-    
-    // CORRECTION: Utiliser clientManager au lieu de sessions
-    const clientManager = require('./client').clientManager;
-    
-    // Vérifier si le client existe et est sain
-    const clientExists = clientManager.clients.has(from);
-    console.log(`📱 Client en mémoire pour ${from}: ${clientExists}`);
-    
-    if (!clientExists) {
-      console.log(`🔄 Tentative de chargement de la session ${from}`);
-      try {
-        await clientManager.initializeClient(from);
-        console.log(`✅ Session ${from} initialisée avec succès`);
-      } catch (loadError) {
-        console.error(`❌ Erreur chargement session ${from}:`, loadError.message);
-        return res.status(500).json({
-          error: `Session non chargée: ${loadError.message}`,
-          from: from,
-          to: to
-        });
-      }
-    }
-
-    // Vérifier le statut réel
-    const senderStatus = getSenderStatus(from);
-    console.log(`📊 Statut de ${from}:`, senderStatus);
-
-    if (!senderStatus.ready || !senderStatus.authenticated) {
-      return res.status(500).json({
-        error: `WhatsApp non prêt: ${senderStatus.status}`,
-        from: from,
-        to: to,
-        status: senderStatus.status,
-        ready: senderStatus.ready,
-        authenticated: senderStatus.authenticated
-      });
-    }
-
-    console.log(`✅ ${from} est connecté, envoi du message...`);
+    // Essayer directement d'envoyer le message
+    // La fonction sendMessage gère elle-même la vérification de la connexion
     const result = await sendMessage({ to, text, attachments, from });
 
     res.json({
@@ -451,13 +424,32 @@ app.post("/send", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    console.error(`❌ Erreur envoi depuis ${from} vers ${to}:`, err.message);
-    res.status(500).json({
-      error: err.message,
-      from: from,
-      to: to,
-      timestamp: new Date().toISOString(),
-    });
+    console.error(`❌ Erreur envoi:`, err.message);
+
+    // Gérer les différents types d'erreurs
+    if (
+      err.message.includes("non connecté") ||
+      err.message.includes("non prêt")
+    ) {
+      return res.status(500).json({
+        error: `WhatsApp non connecté sur ${from}: ${err.message}`,
+        suggestion: "Générez d'abord un QR code pour cette session",
+        from: from,
+        to: to,
+      });
+    } else if (err.message.includes("non enregistré")) {
+      return res.status(400).json({
+        error: `Le numéro ${to} n'est pas enregistré sur WhatsApp`,
+        from: from,
+        to: to,
+      });
+    } else {
+      return res.status(500).json({
+        error: err.message,
+        from: from,
+        to: to,
+      });
+    }
   }
 });
 // 4️⃣ STATUT DES SESSIONS D'UN USER
@@ -665,66 +657,80 @@ app.post("/send", async (req, res) => {
     return res.status(400).json({ error: "Numéro expéditeur requis" });
   }
 
-  try {
-    // 🆕 VÉRIFICATION RENFORCÉE DE LA CONNEXION
-    console.log(`🔍 Vérification connexion pour ${from}`);
+  //try {
+  // 🆕 VÉRIFICATION RENFORCÉE DE LA CONNEXION
+  console.log(`🔍 Vérification connexion pour ${from}`);
 
-    // Vérifier si la session existe en mémoire
-    const sessionExists = sessions.has(from);
-    console.log(`📱 Session en mémoire pour ${from}: ${sessionExists}`);
+  // CORRECTION: Utiliser clientManager au lieu de sessions
+  const { getSenderStatus, sendMessage, loadSession } = require("./client");
 
-    if (!sessionExists) {
-      console.log(`🔄 Tentative de chargement de la session ${from}`);
-      try {
-        await loadSession(from);
-        console.log(`✅ Session ${from} chargée avec succès`);
-      } catch (loadError) {
-        console.error(
-          `❌ Erreur chargement session ${from}:`,
-          loadError.message
-        );
+  // Vérifier si le client existe en mémoire
+  const senderStatus = getSenderStatus(from);
+  console.log(`📱 Statut de ${from}:`, senderStatus);
+
+  // Si le client n'est pas initialisé ou pas prêt
+  if (senderStatus.status === "not_initialized" || !senderStatus.ready) {
+    console.log(`🔄 Tentative de chargement de la session ${from}`);
+    try {
+      await loadSession(from);
+      console.log(`✅ Session ${from} chargée avec succès`);
+
+      // Re-vérifier le statut après chargement
+      const newStatus = getSenderStatus(from);
+      console.log(`📊 Nouveau statut de ${from}:`, newStatus);
+
+      if (!newStatus.ready) {
         return res.status(500).json({
-          error: `Session non chargée: ${loadError.message}`,
+          error: `WhatsApp non prêt après chargement: ${newStatus.status}`,
           from: from,
           to: to,
+          status: newStatus.status,
         });
       }
-    }
-
-    // Vérifier le statut réel
-    const senderStatus = getSenderStatus(from);
-    console.log(`📊 Statut de ${from}:`, senderStatus);
-
-    if (!senderStatus.ready || !senderStatus.authenticated) {
+    } catch (loadError) {
+      console.error(`❌ Erreur chargement session ${from}:`, loadError.message);
       return res.status(500).json({
-        error: `WhatsApp non prêt: ${senderStatus.status}`,
+        error: `Session non chargée: ${loadError.message}`,
         from: from,
         to: to,
-        status: senderStatus.status,
-        ready: senderStatus.ready,
-        authenticated: senderStatus.authenticated,
       });
     }
+  }
 
-    console.log(`✅ ${from} est connecté, envoi du message...`);
-    const result = await sendMessage({ to, text, attachments, from });
+  // Vérifier le statut final
+  const finalStatus = getSenderStatus(from);
+  console.log(`📊 Statut final de ${from}:`, finalStatus);
 
-    res.json({
-      success: true,
-      message: "Message envoyé avec succès!",
-      from: result.from,
-      to: result.to,
-      timestamp: new Date().toISOString(),
+  if (!finalStatus.ready || !finalStatus.authenticated) {
+    return res.status(500).json({
+      error: `WhatsApp non prêt: ${finalStatus.status}`,
+      from: from,
+      to: to,
+      status: finalStatus.status,
+      ready: finalStatus.ready,
+      authenticated: finalStatus.authenticated,
     });
-  } catch (err) {
+  }
+
+  console.log(`✅ ${from} est connecté, envoi du message...`);
+  const result = await sendMessage({ to, text, attachments, from });
+
+  res.json({
+    success: true,
+    message: "Message envoyé avec succès!",
+    from: result.from,
+    to: result.to,
+    timestamp: new Date().toISOString(),
+  });
+  /*} catch (err) {
     console.error(`❌ Erreur envoi depuis ${from} vers ${to}:`, err.message);
     res.status(500).json({
       error: err.message,
       from: from,
       to: to,
       timestamp: new Date().toISOString(),
-    });
-  }
+    });*/
+  //  }
 });
 
 // 8️⃣ LISTER TOUS LES SENDERS CONNECTÉS

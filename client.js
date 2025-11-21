@@ -15,7 +15,6 @@ class WhatsAppClientManager {
     this.initializationLocks = new Map();
     this.qrGenerationLocks = new Map();
     this.sessionQueue = [];
-    this.session=[];
     this.yiiApiUrl = process.env.YII_API_URL || "http://localhost:8080";
     this.yiiApiSecret = process.env.YII_API_SECRET || "my_very_secret_key_123";
 
@@ -32,37 +31,48 @@ class WhatsAppClientManager {
   async initializeClient(phoneNumber, userId = null) {
     const clientKey = phoneNumber;
 
+    // 🔒 Si un client est déjà en cours d'initialisation → on attend
     if (this.initializationLocks.has(clientKey)) {
-      console.log(`⏳ [${phoneNumber}] Client déjà en cours d'initialisation...`);
+      console.log(`⏳ [${phoneNumber}] Initialisation déjà en cours...`);
+
       return new Promise((resolve) => {
-        const checkClient = () => {
+        const waitForInit = () => {
           const client = this.clients.get(clientKey);
-          if (client && this.clientStates.get(clientKey)?.initialized) {
+          const state = this.clientStates.get(clientKey);
+
+          if (client && state?.initialized) {
             resolve(client);
           } else {
-            setTimeout(checkClient, 500);
+            setTimeout(waitForInit, 300);
           }
         };
-        checkClient();
+        waitForInit();
       });
     }
 
+    // Marquage pour éviter double init
     this.initializationLocks.set(clientKey, true);
 
     try {
+      // 🟢 Vérification du client existant
       const existingClient = this.clients.get(clientKey);
+
       if (existingClient && (await this.isClientHealthy(clientKey))) {
-        console.log(`♻️ [${phoneNumber}] Réutilisation client existant`);
+        console.log(`♻️ [${phoneNumber}] Client actif réutilisé`);
         this.updateSessionActivity(clientKey);
         return existingClient;
       }
 
+      // 🔥 Trop de clients actifs ? → on en désactive un
       if (this.clients.size >= MAX_ACTIVE_CLIENTS) {
         await this.deactivateOldestClient();
       }
 
-      console.log(`🆕 [${phoneNumber}] Création client WhatsApp...`);
+      console.log(
+        `🆕 [${phoneNumber}] Création d'un nouveau client WhatsApp...`
+      );
 
+      // 🆕 Nouveau client
       const client = new Client({
         authStrategy: new LocalAuth({
           clientId: phoneNumber,
@@ -82,26 +92,33 @@ class WhatsAppClientManager {
         restartOnAuthFail: true,
       });
 
+      // 🗄️ État interne
       this.clientStates.set(clientKey, {
         ready: false,
         qr: null,
         authenticated: false,
         lastActivity: Date.now(),
-        initialized: true,
+        initialized: false,
         qrGenerated: false,
       });
 
+      // 📡 Écouteurs d'événements
       this.setupEventHandlers(client, clientKey);
-      client.initialize();
 
+      // 🚀 Initialisation du client
+      await client.initialize();
+
+      // Le client est maintenant officiellement prêt à être utilisé
+      this.clientStates.get(clientKey).initialized = true;
+
+      // On enregistre ce client
       this.clients.set(clientKey, client);
       this.updateSessionActivity(clientKey);
 
       return client;
     } finally {
-      setTimeout(() => {
-        this.initializationLocks.delete(clientKey);
-      }, 2000);
+      // Libère le lock après un court délai
+      setTimeout(() => this.initializationLocks.delete(clientKey), 1500);
     }
   }
 
@@ -235,7 +252,9 @@ class WhatsAppClientManager {
 
           if (currentState && currentState.qr) {
             clearTimeout(timeout);
-            console.log(`✅ [${phoneNumber}] QR généré avec succès pour user ${userId}`);
+            console.log(
+              `✅ [${phoneNumber}] QR généré avec succès pour user ${userId}`
+            );
             resolve({
               qr: currentState.qr,
               status: "qr_ready",
@@ -244,7 +263,9 @@ class WhatsAppClientManager {
             });
           } else if (currentState && currentState.ready) {
             clearTimeout(timeout);
-            console.log(`✅ [${phoneNumber}] Déjà authentifié pendant l'attente`);
+            console.log(
+              `✅ [${phoneNumber}] Déjà authentifié pendant l'attente`
+            );
             resolve({
               status: "authenticated",
               message: "WhatsApp déjà connecté",
@@ -268,46 +289,162 @@ class WhatsAppClientManager {
   }
 
   /**
-   * 📨 ENVOYER MESSAGE
+   * 📨 ENVOYER MESSAGE - CORRIGÉ
+   */
+  /**
+   * 📨 ENVOYER MESSAGE - CORRIGÉ ET COMPLET
    */
   async sendMessage(messageData) {
     const { to, text, attachments, from } = messageData;
     const clientKey = from;
 
-    if (!this.clients.has(clientKey)) {
-      await this.initializeClient(from);
-    }
+    console.log(`📩 Envoi message à ${to} depuis ${clientKey}...`);
 
-    if (!(await this.isClientHealthy(clientKey))) {
-      throw new Error(`WhatsApp non connecté sur ${from}`);
-    }
-
-    const client = this.clients.get(clientKey);
-    const numberDetails = await client.getNumberId(to);
-
-    if (!numberDetails) {
-      throw new Error("Numéro non enregistré sur WhatsApp");
-    }
-
-    const chatId = numberDetails._serialized;
-
-    if (attachments && Array.isArray(attachments)) {
-      for (const attachment of attachments) {
-        const media = await this.createMediaFromAttachment(attachment);
-        await client.sendMessage(chatId, media, { caption: text });
+    try {
+      // ✅ Vérifier et initialiser le client si nécessaire
+      if (
+        !this.clients.has(clientKey) ||
+        !(await this.isClientHealthy(clientKey))
+      ) {
+        console.log(`🔄 Client ${clientKey} non trouvé, initialisation...`);
+        await this.initializeClient(from);
       }
-    } else if (text) {
-      await client.sendMessage(chatId, text);
+
+      // ✅ Vérifier à nouveau après initialisation
+      if (!this.clients.has(clientKey)) {
+        throw new Error(
+          `Client ${clientKey} non disponible après initialisation`
+        );
+      }
+
+      const client = this.clients.get(clientKey);
+
+      if (!client) {
+        throw new Error(`Client WhatsApp non disponible pour ${from}`);
+      }
+
+      // Vérifier si le client est prêt
+      const state = this.clientStates.get(clientKey);
+      if (!state || !state.ready || !state.authenticated) {
+        throw new Error(
+          `WhatsApp non connecté sur ${from}. Statut: ${
+            state?.status || "non initialisé"
+          }`
+        );
+      }
+
+      console.log(`✅ Client ${clientKey} prêt, envoi du message...`);
+
+      // ✅ FORMATER LE NUMÉRO (TRÈS IMPORTANT)
+      const formattedTo = to;
+      console.log(`🔍 Numéro formaté: ${to} → ${formattedTo}`);
+
+      // ✅ VÉRIFIER LE NUMÉRO SUR WHATSAPP
+      console.log(`🔍 Vérification numéro ${formattedTo} sur WhatsApp...`);
+      const numberDetails = await client.getNumberId(formattedTo);
+      console.log(
+        `✅ Détails du numéro obtenus:`,
+        numberDetails ? "Numéro valide" : "Numéro invalide"
+      );
+
+      if (!numberDetails) {
+        throw new Error(
+          `Le numéro ${formattedTo} n'est pas enregistré sur WhatsApp. Vérifiez le format: doit être +212612345678`
+        );
+      }
+
+      const chatId = numberDetails._serialized;
+      console.log(`💬 Chat ID: ${chatId}`);
+
+      // ✅ ENVOYER LE MESSAGE
+      let messageResult;
+
+      if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+        console.log(`📎 Envoi avec ${attachments.length} pièce(s) jointe(s)`);
+        for (const attachment of attachments) {
+          const media = await this.createMediaFromAttachment(attachment);
+          messageResult = await client.sendMessage(chatId, media, {
+            caption: text,
+          });
+          console.log(`✅ Fichier envoyé: ${attachment.name || "sans nom"}`);
+        }
+      } else if (text) {
+        console.log(
+          `📝 Envoi texte: "${text.substring(0, 50)}${
+            text.length > 50 ? "..." : ""
+          }"`
+        );
+        messageResult = await client.sendMessage(chatId, text);
+      } else {
+        throw new Error(
+          "Aucun contenu à envoyer (texte ou pièces jointes requis)"
+        );
+      }
+
+      // ✅ CONFIRMATION
+      this.updateSessionActivity(clientKey);
+      console.log(
+        `✅ Message envoyé avec succès à ${formattedTo} depuis ${from}`
+      );
+
+      if (messageResult) {
+        console.log(`📨 ID du message: ${messageResult.id._serialized}`);
+      }
+
+      return {
+        success: true,
+        to: formattedTo,
+        from,
+        messageId: messageResult?.id?._serialized,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      console.error(
+        `❌ Erreur envoi message de ${from} vers ${to}:`,
+        error.message
+      );
+
+      // Relancer l'erreur avec plus de détails
+      throw new Error(`Échec envoi: ${error.message}`);
+    }
+  }
+
+  /**
+   * 🆕 MÉTHODE POUR FORMATER LES NUMÉROS
+   */
+  formatPhoneNumber(phone) {
+    if (!phone) {
+      throw new Error("Numéro vide");
     }
 
-    this.updateSessionActivity(clientKey);
-    console.log(`✅ Message envoyé à ${to} depuis ${from}`);
-    
-    return {
-      success: true,
-      to,
-      from,
-    };
+    // Supprimer tous les caractères non numériques sauf le +
+    let cleaned = phone.replace(/[^\d+]/g, "");
+
+    // Si le numéro commence par 0, remplacer par l'indicatif Maroc
+    if (cleaned.startsWith("0")) {
+      cleaned = "+212" + cleaned.substring(1);
+    }
+    // Si le numéro commence par 6 ou 7 sans indicatif
+    else if (cleaned.match(/^[67]\d{8}$/)) {
+      cleaned = "+212" + cleaned;
+    }
+    // Si le numéro a l'indicatif sans +
+    else if (cleaned.startsWith("212")) {
+      cleaned = "+" + cleaned;
+    }
+    // Si le numéro n'a pas de +
+    else if (cleaned.match(/^\d{9,15}$/) && !cleaned.startsWith("+")) {
+      cleaned = "+" + cleaned;
+    }
+
+    // Vérifier le format final
+    if (!cleaned.match(/^\+\d{10,15}$/)) {
+      throw new Error(
+        `Format de numéro invalide: ${phone} → ${cleaned}. Format attendu: +212612345678`
+      );
+    }
+
+    return cleaned;
   }
 
   /**
@@ -315,8 +452,11 @@ class WhatsAppClientManager {
    */
   async loadExistingSession(phoneNumber) {
     const clientKey = phoneNumber;
-    
-    if (this.clients.has(clientKey) && await this.isClientHealthy(clientKey)) {
+
+    if (
+      this.clients.has(clientKey) &&
+      (await this.isClientHealthy(clientKey))
+    ) {
       return this.clients.get(clientKey);
     }
 
@@ -343,17 +483,17 @@ class WhatsAppClientManager {
   getAllAvailableSessions() {
     const sessionsDir = this.sessionPath;
     const allSessions = [];
-    
+
     try {
       if (fs.existsSync(sessionsDir)) {
         const folders = fs.readdirSync(sessionsDir);
-        
-        folders.forEach(folder => {
-          if (folder.startsWith('session-user_')) {
-            const phoneNumber = folder.replace('session-', '');
+
+        folders.forEach((folder) => {
+          if (folder.startsWith("session-user_")) {
+            const phoneNumber = folder.replace("session-", "");
             const state = this.clientStates.get(phoneNumber);
             const existsInMemory = this.clients.has(phoneNumber);
-            
+
             allSessions.push({
               phoneNumber: phoneNumber,
               folderName: folder,
@@ -362,7 +502,13 @@ class WhatsAppClientManager {
               authenticated: state?.authenticated || false,
               hasQR: !!state?.qr,
               lastActivity: state?.lastActivity || null,
-              status: state ? (state.ready ? 'authenticated' : state.qr ? 'qr_ready' : 'waiting') : 'not_loaded'
+              status: state
+                ? state.ready
+                  ? "authenticated"
+                  : state.qr
+                  ? "qr_ready"
+                  : "waiting"
+                : "not_loaded",
             });
           }
         });
@@ -370,7 +516,7 @@ class WhatsAppClientManager {
     } catch (error) {
       console.error("❌ Erreur scan sessions:", error);
     }
-    
+
     return allSessions;
   }
 
@@ -380,9 +526,9 @@ class WhatsAppClientManager {
   async associatePhoneWithUser(userId, phoneNumber) {
     try {
       console.log(`🔗 Association ${phoneNumber} avec user ${userId}`);
-      
+
       const response = await axios.post(
-        `${this.yiiApiUrl}/api/associate-phone`,
+        `${this.yiiApiUrl}/api/whatsapp-connected`,
         {
           user_id: userId,
           phone_number: phoneNumber,
@@ -408,7 +554,6 @@ class WhatsAppClientManager {
     }
   }
 
-  // ... autres méthodes existantes (getSenderStatus, isClientHealthy, etc.)
   getSenderStatus(phoneNumber) {
     const state = this.clientStates.get(phoneNumber);
     if (!state) {
@@ -417,6 +562,7 @@ class WhatsAppClientManager {
         ready: false,
         authenticated: false,
         hasQR: false,
+        lastActivity: null,
       };
     }
     return {
@@ -483,7 +629,9 @@ class WhatsAppClientManager {
 
   async createMediaFromAttachment(attachment) {
     const ext = attachment.type.split("/")[1] || "bin";
-    const filename = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${ext}`;
+    const filename = `temp_${Date.now()}_${Math.random()
+      .toString(36)
+      .substr(2, 9)}.${ext}`;
     const filePath = path.join(this.sessionPath, "temp", filename);
 
     if (!fs.existsSync(path.dirname(filePath))) {
@@ -514,7 +662,11 @@ class WhatsAppClientManager {
     for (const [phoneNumber, state] of this.clientStates.entries()) {
       allSessions.push({
         phoneNumber: phoneNumber,
-        status: state.ready ? "authenticated" : state.qr ? "qr_ready" : "waiting",
+        status: state.ready
+          ? "authenticated"
+          : state.qr
+          ? "qr_ready"
+          : "waiting",
         ready: state.ready,
         authenticated: state.authenticated,
         hasQR: !!state.qr,
@@ -549,29 +701,47 @@ class WhatsAppClientManager {
   async debitQrCodeCount(phoneNumber) {
     try {
       console.log(`💰 [${phoneNumber}] Débit qrcode_count...`);
+
+      // 🆕 Extraire l'user_id du numéro virtuel
+      let userId = this.extractUserIdFromPhone(phoneNumber);
+      console.log(`🔍 [${phoneNumber}] ID utilisateur extrait: ${userId}`);
+      console.log(`${this.yiiApiUrl}/api/whatsapp-connected`);
       const response = await axios.post(
         `${this.yiiApiUrl}/api/whatsapp-connected`,
-        {
-          user_id: phoneNumber,
-          secret: this.yiiApiSecret,
-        },
+        `user_id=${userId}&secret=${encodeURIComponent(this.yiiApiSecret)}`,
         {
           timeout: 5000,
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded", // 🆕
           },
         }
       );
       if (response.data.success) {
-        console.log(`✅ [${phoneNumber}] Compte débité avec succès`);
+        console.log(
+          `✅ [${phoneNumber}] Compte débité avec succès pour user ${userId}`
+        );
         return response.data;
       } else {
         throw new Error(response.data.error || "Erreur débit");
       }
     } catch (error) {
       console.error(`❌ [${phoneNumber}] Erreur API débit:`, error.message);
+      // 🆕 Afficher plus de détails
+      if (error.response) {
+        console.error(`📊 Status: ${error.response.status}`);
+        console.error(`📊 Data:`, error.response.data);
+      }
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * 🆕 Extraire l'ID utilisateur du numéro virtuel
+   */
+  extractUserIdFromPhone(phoneNumber) {
+    // Format: "user_15_1763581264874" → extraire "15"
+    const match = phoneNumber.match(/user_(\d+)_/);
+    return match ? parseInt(match[1]) : null;
   }
 }
 
@@ -590,7 +760,7 @@ async function loadSession(phoneNumber) {
     return {
       success: true,
       phoneNumber: phoneNumber,
-      client: result
+      client: result,
     };
   } catch (error) {
     console.error(`❌ Erreur chargement ${phoneNumber}:`, error.message);
@@ -606,14 +776,14 @@ async function loadSessionIntoMemory(phoneNumber) {
       success: true,
       phoneNumber: phoneNumber,
       status: result.status,
-      ready: result.ready || false
+      ready: result.ready || false,
     };
   } catch (error) {
     console.error(`❌ Erreur chargement ${phoneNumber}:`, error.message);
     return {
       success: false,
       phoneNumber: phoneNumber,
-      error: error.message
+      error: error.message,
     };
   }
 }
@@ -629,20 +799,30 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-// Export des fonctions
+// ✅ CORRECTION: Export propre avec toutes les fonctions
 module.exports = {
-  generateNewQR: (phoneNumber, userId) => clientManager.generateNewQR(phoneNumber, userId),
+  // Export de l'instance principale (utile pour le debug)
+  clientManager,
+
+  // Méthodes principales bindées
+  generateNewQR: (phoneNumber, userId) =>
+    clientManager.generateNewQR(phoneNumber, userId),
   sendMessage: (messageData) => clientManager.sendMessage(messageData),
   getSenderStatus: (phoneNumber) => clientManager.getSenderStatus(phoneNumber),
   getConnectedSenders: () => clientManager.getConnectedSenders(),
-  disconnectClient: (phoneNumber) => clientManager.disconnectClient(phoneNumber),
+  disconnectClient: (phoneNumber) =>
+    clientManager.disconnectClient(phoneNumber),
   getStats: () => clientManager.getStats(),
   shutdown: () => clientManager.shutdown(),
   getAllSessions: () => clientManager.getAllSessions(),
   getAllAvailableSessions: () => clientManager.getAllAvailableSessions(),
+
+  // Fonctions utilitaires
   scanAllSessions,
   loadSessionIntoMemory,
   loadSession,
+
+  // Classes WhatsApp
   Client,
   LocalAuth,
   Buttons,
