@@ -6,6 +6,7 @@ const axios = require("axios");
 const path = require("path");
 const {
   generateNewQR,
+  generateNewQRPhone,
   sendMessage,
   getSenderStatus,
   getConnectedSenders,
@@ -129,11 +130,17 @@ const YII_API_SECRET = process.env.YII_API_SECRET || "my_very_secret_key_123";
 // Middleware de logging
 
 app.use((req, res, next) => {
-  const allowedOrigins = [
-    "http://localhost:8080",
-    "http://localhost:3000",
-    "http://localhost:4000",
-  ];
+const allowedOrigins = [
+      "http://localhost:8080",
+      "http://localhost:3000",
+      "http://localhost:4000",
+      "http://148.230.116.113:8000",
+      "http://148.230.116.113:4000",
+      "https://148.230.116.113:8000",
+      "https://148.230.116.113:4000",
+      "https://tickets.voyage-test.xyz",
+      "http://tickets.voyage-test.xyz",
+    ];
   const origin = req.headers.origin;
 
   if (allowedOrigins.includes(origin)) {
@@ -291,6 +298,37 @@ app.get("/user/:userId/phones", async (req, res) => {
       `🎯 ${userSessionsOnDisk.length} sessions pour user ${userId} sur disque`
     );
 
+    // 🆕 GÉNÉRATION AUTOMATIQUE SI AUCUNE SESSION
+    if (userSessionsOnDisk.length === 0) {
+      console.log(`🆕 Aucune session, génération QR automatique pour user ${userId}`);
+      
+      const phoneNumber = `user_${userId}_${Date.now()}`;
+      console.log(`📱 Création nouvelle session: ${phoneNumber}`);
+      
+      // Générer le QR code
+      const qrResult = await generateNewQR(phoneNumber, userId);
+      
+      if (qrResult && qrResult.qr) {
+        console.log(`✅ QR généré avec succès pour user ${userId}`);
+        
+        return res.json({
+          success: true,
+          action: "created",
+          status: qrResult.status,
+          qrImage: qrResult.qr,
+          qrRaw: qrResult.qr,
+          message: qrResult.message || "Scannez ce QR avec WhatsApp",
+          ready: qrResult.ready || false,
+          user_id: userId,
+          phone_number: phoneNumber,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        throw new Error("Échec de la génération du QR code");
+      }
+    }
+
+    // 📋 TRAITEMENT DES SESSIONS EXISTANTES (votre logique originale)
     const finalSessions = [];
 
     for (const session of userSessionsOnDisk) {
@@ -299,7 +337,7 @@ app.get("/user/:userId/phones", async (req, res) => {
 
         if (!session.existsInMemory) {
           console.log(`📥 Chargement ${session.phoneNumber} en mémoire...`);
-          await generateNewQR(session.phoneNumber);
+          await generateNewQRPhone(session.phoneNumber);
           await new Promise((resolve) => setTimeout(resolve, 2000));
         }
 
@@ -322,7 +360,7 @@ app.get("/user/:userId/phones", async (req, res) => {
 
         finalSessions.push({
           phone_number: session.phoneNumber,
-          real_phone_number: realPhoneNumber, // 🆕
+          real_phone_number: realPhoneNumber,
           status: currentStatus.status,
           ready: currentStatus.ready,
           authenticated: currentStatus.authenticated,
@@ -343,8 +381,8 @@ app.get("/user/:userId/phones", async (req, res) => {
           sessionError.message
         );
         finalSessions.push({
-          phone_number: realPhoneNumber , // 🆕 Utilise le vrai numéro si disponible
-          real_phone_number: realPhoneNumber,
+          phone_number: session.phoneNumber,
+          real_phone_number: null,
           status: "error",
           ready: false,
           authenticated: false,
@@ -374,6 +412,7 @@ app.get("/user/:userId/phones", async (req, res) => {
 
     res.json({
       success: true,
+      action: "listed",
       user_id: userId,
       summary: {
         total_sessions: finalSessions.length,
@@ -393,6 +432,7 @@ app.get("/user/:userId/phones", async (req, res) => {
       err.message
     );
     res.status(500).json({
+      success: false,
       error: err.message,
       user_id: userId,
     });

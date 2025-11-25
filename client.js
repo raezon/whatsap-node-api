@@ -3,6 +3,12 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 
+// Chemin du fichier de sauvegarde
+const AUTH_STATE_FILE = path.join(__dirname, "authState.json");
+
+// Charger l'état au démarrage
+let authState = new Map();
+
 const MAX_ACTIVE_CLIENTS = parseInt(process.env.MAX_ACTIVE_CLIENTS) || 10;
 const SESSION_TIMEOUT = 30 * 60 * 1000;
 
@@ -140,16 +146,56 @@ class WhatsAppClientManager {
       state.authenticated = false;
       state.qrGenerated = true;
       state.lastActivity = Date.now();
+      // 🆕 Marquer que c'est une NOUVELLE session
+      state.debitDone = false;
     });
 
-    client.on("authenticated", () => {
+    async function loadAuthState() {
+      try {
+        const data = await fs.readFile(AUTH_STATE_FILE, "utf8");
+        const saved = JSON.parse(data);
+        authState = new Map(Object.entries(saved));
+        console.log("✅ État auth chargé:", Array.from(authState.keys()));
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          await fs.writeFile(AUTH_STATE_FILE, "{}");
+          console.log("📁 Fichier authState.json créé");
+        } else {
+          console.error("❌ Erreur chargement authState:", error.message);
+        }
+      }
+    }
+
+    async function saveAuthState() {
+      try {
+        const data = JSON.stringify(Object.fromEntries(authState), null, 2);
+        await fs.writeFile(AUTH_STATE_FILE, data);
+      } catch (error) {
+        console.error("❌ Erreur sauvegarde authState:", error.message);
+      }
+    }
+
+    // Charger l'état au début
+    loadAuthState();
+
+    // VOTRE ÉVÉNEMENT AUTHENTIFIED MODIFIÉ
+    client.on("authenticated", async () => {
+      if (!state.debitDone) {
+        state.debitDone = true;
+        console.log(
+          `💰 [${clientKey}] Première authentification - Débit du QR code`
+        );
+        this.debitQrCodeCount(clientKey).catch((err) => {
+          console.error(`❌ [${clientKey}] Erreur débit:`, err.message);
+        });
+      } else {
+        console.log(
+          `🔄 [${clientKey}] Reconnexion - Pas de débit (déjà débité)`
+        );
+      }
       console.log(`🔐 [${clientKey}] Authentifié - QR SCANNÉ!`);
       state.authenticated = true;
       state.lastActivity = Date.now();
-
-      this.debitQrCodeCount(clientKey).catch((err) => {
-        console.error(`❌ [${clientKey}] Erreur débit:`, err.message);
-      });
     });
 
     client.on("ready", () => {
@@ -177,6 +223,118 @@ class WhatsAppClientManager {
    * 🔍 GÉNÉRER QR CODE
    */
   async generateNewQR(phoneNumber, userId = null) {
+    if (this.qrGenerationLocks.has(phoneNumber)) {
+      console.log(`⏳ [${phoneNumber}] QR déjà en cours de génération...`);
+      return new Promise((resolve, reject) => {
+        const checkQR = () => {
+          const state = this.clientStates.get(phoneNumber);
+          if (state && state.qr) {
+            resolve({
+              qr: state.qr,
+              status: "qr_ready",
+              ready: false,
+              message: "QR déjà disponible",
+            });
+          } else if (state && state.ready) {
+            resolve({
+              status: "authenticated",
+              message: "Déjà authentifié",
+              ready: true,
+            });
+          } else if (!this.qrGenerationLocks.has(phoneNumber)) {
+            reject(new Error("Échec génération QR"));
+          } else {
+            setTimeout(checkQR, 1000);
+          }
+        };
+        state.debitDone = true;
+        checkQR();
+      });
+    }
+
+    this.qrGenerationLocks.set(phoneNumber, true);
+    console.log(`🎯 [${phoneNumber}] Demande QR code pour user ${userId}...`);
+
+    try {
+      const state = this.clientStates.get(phoneNumber);
+
+      if (state && state.ready && state.authenticated) {
+        console.log(`✅ [${phoneNumber}] Déjà authentifié`);
+        if (userId) {
+          await this.associatePhoneWithUser(userId, phoneNumber);
+        }
+        return {
+          status: "authenticated",
+          message: "WhatsApp déjà connecté",
+          ready: true,
+        };
+      }
+
+      if (state && state.qr) {
+        console.log(`📱 [${phoneNumber}] QR déjà disponible`);
+        if (userId) {
+          await this.associatePhoneWithUser(userId, phoneNumber);
+        }
+        return {
+          qr: state.qr,
+          status: "qr_ready",
+          ready: false,
+          message: "Scannez ce QR",
+        };
+      }
+
+      await this.initializeClient(phoneNumber, userId);
+
+      if (userId) {
+        await this.associatePhoneWithUser(userId, phoneNumber);
+      }
+
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("QR non généré après 30s"));
+        }, 30000);
+
+        const checkQR = () => {
+          const currentState = this.clientStates.get(phoneNumber);
+
+          if (currentState && currentState.qr) {
+            clearTimeout(timeout);
+            console.log(
+              `✅ [${phoneNumber}] QR généré avec succès pour user ${userId}`
+            );
+            resolve({
+              qr: currentState.qr,
+              status: "qr_ready",
+              ready: false,
+              message: "Scannez ce QR avec WhatsApp",
+            });
+          } else if (currentState && currentState.ready) {
+            clearTimeout(timeout);
+            console.log(
+              `✅ [${phoneNumber}] Déjà authentifié pendant l'attente`
+            );
+            resolve({
+              status: "authenticated",
+              message: "WhatsApp déjà connecté",
+              ready: true,
+            });
+          } else {
+            setTimeout(checkQR, 1000);
+          }
+        };
+
+        checkQR();
+      });
+    } catch (error) {
+      console.error(`❌ [${phoneNumber}] Erreur génération QR:`, error.message);
+      throw error;
+    } finally {
+      setTimeout(() => {
+        this.qrGenerationLocks.delete(phoneNumber);
+      }, 2000);
+    }
+  }
+  async generateNewQRPhone(phoneNumber, userId = null) {
     if (this.qrGenerationLocks.has(phoneNumber)) {
       console.log(`⏳ [${phoneNumber}] QR déjà en cours de génération...`);
       return new Promise((resolve, reject) => {
@@ -348,9 +506,17 @@ class WhatsAppClientManager {
       );
 
       if (!numberDetails) {
-        throw new Error(
-          `Le numéro ${formattedTo} n'est pas enregistré sur WhatsApp. Vérifiez le format: doit être +212612345678`
+        console.log(
+          `⚠️ Numéro ${formattedTo} non enregistré sur WhatsApp, ignoré`
         );
+        return {
+          success: false,
+          to: formattedTo,
+          from,
+          skipped: true,
+          reason: "Numéro non enregistré sur WhatsApp",
+          timestamp: new Date().toISOString(),
+        };
       }
 
       const chatId = numberDetails._serialized;
@@ -498,9 +664,9 @@ class WhatsAppClientManager {
               phoneNumber: phoneNumber,
               folderName: folder,
               existsInMemory: existsInMemory,
-              ready: state?.ready || false,
+              ready: true,
               authenticated: state?.authenticated || false,
-              hasQR: !!state?.qr,
+              hasQR: true,
               lastActivity: state?.lastActivity || null,
               status: state
                 ? state.ready
@@ -807,6 +973,8 @@ module.exports = {
   // Méthodes principales bindées
   generateNewQR: (phoneNumber, userId) =>
     clientManager.generateNewQR(phoneNumber, userId),
+  generateNewQRPhone: (phoneNumber, userId) =>
+    clientManager.generateNewQRPhone(phoneNumber, userId),
   sendMessage: (messageData) => clientManager.sendMessage(messageData),
   getSenderStatus: (phoneNumber) => clientManager.getSenderStatus(phoneNumber),
   getConnectedSenders: () => clientManager.getConnectedSenders(),
