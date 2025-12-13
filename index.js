@@ -890,7 +890,6 @@ app.delete("/user/:userId/session/:phoneNumber", async (req, res) => {
 // ROUTES EXISTANTES (compatibilité)
 // -----------------------------
 
-// 6️⃣ GÉNÉRER QR CODE POUR UN NUMÉRO SPÉCIFIQUE (si besoin)
 app.get("/generate-qr/:user_id", async (req, res) => {
   const { user_id } = req.params;
 
