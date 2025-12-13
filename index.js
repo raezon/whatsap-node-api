@@ -16,6 +16,7 @@ const {
   getStats,
   Buttons,
   loadSession,
+  loadSessionBySession,
   MessageMedia,
   clientManager
 } = require("./client");
@@ -724,6 +725,48 @@ app.post("/send", async (req, res) => {
   }
 
   try {
+    // AJOUT: Vérifier et charger la session si nécessaire
+    console.log(`🔍 Vérification session ${from}...`);
+  
+    
+    const senderStatus = getSenderStatus(from);
+    console.log(`📊 Statut session ${from}:`, senderStatus);
+    
+    // Si la session n'est pas prête, essayer de la charger
+    if (senderStatus.status === "not_initialized" || !senderStatus.ready) {
+      console.log(`🔄 Chargement session ${from}...`);
+      const loadResult = await loadSessionBySession(from);
+      
+      // Si la session nécessite un QR code (nouvelle session ou reconnect)
+      if (loadResult.qrCode && !loadResult.ready) {
+        return res.status(400).json({
+          error: `Session ${from} non connectée`,
+          suggestion: "Scannez le QR code pour authentifier cette session WhatsApp",
+          qrCode: loadResult.qrCode,
+          sessionName: from,
+          status: loadResult.status,
+          qrExpiresIn: "5 minutes",
+          from: from,
+          to: to,
+        });
+      }
+      
+      // Si le chargement a échoué
+      if (!loadResult.success) {
+        throw new Error(`Échec chargement session ${from}: ${loadResult.error || 'Erreur inconnue'}`);
+      }
+      
+      console.log(`✅ Session ${from} chargée avec succès`);
+    }
+    
+    // Re-vérifier après chargement
+    const finalStatus = getSenderStatus(from);
+    if (!finalStatus.ready || !finalStatus.authenticated) {
+      throw new Error(`Session ${from} non connectée après chargement: ${finalStatus.status}`);
+    }
+
+    console.log(`✅ ${from} est connecté, envoi du message...`);
+    
     // Essayer directement d'envoyer le message
     // La fonction sendMessage gère elle-même la vérification de la connexion
     const result = await sendMessage({ to, text, attachments, from });
@@ -741,7 +784,8 @@ app.post("/send", async (req, res) => {
     // Gérer les différents types d'erreurs
     if (
       err.message.includes("non connecté") ||
-      err.message.includes("non prêt")
+      err.message.includes("non prêt") ||
+      err.message.includes("non connectée")
     ) {
       return res.status(500).json({
         error: `WhatsApp non connecté sur ${from}: ${err.message}`,
@@ -955,95 +999,7 @@ app.get("/generate-qr1/:user_id", async (req, res) => {
   }
 });
 
-// 7️⃣ ENVOYER MESSAGE (version simple avec numéro direct)
-app.post("/send", async (req, res) => {
-  const { to, text, attachments, from } = req.body;
 
-  console.log(`📤 Tentative d'envoi depuis ${from} vers ${to}`);
-
-  if (!to) {
-    return res.status(400).json({ error: "Numéro destinataire requis" });
-  }
-
-  if (!from) {
-    return res.status(400).json({ error: "Numéro expéditeur requis" });
-  }
-
-  //try {
-  // 🆕 VÉRIFICATION RENFORCÉE DE LA CONNEXION
-  console.log(`🔍 Vérification connexion pour ${from}`);
-
-  // CORRECTION: Utiliser clientManager au lieu de sessions
-  const { getSenderStatus, sendMessage, loadSession } = require("./client");
-
-  // Vérifier si le client existe en mémoire
-  const senderStatus = getSenderStatus(from);
-  console.log(`📱 Statut de ${from}:`, senderStatus);
-
-  // Si le client n'est pas initialisé ou pas prêt
-  if (senderStatus.status === "not_initialized" || !senderStatus.ready) {
-    console.log(`🔄 Tentative de chargement de la session ${from}`);
-    try {
-      await loadSession(from);
-      console.log(`✅ Session ${from} chargée avec succès`);
-
-      // Re-vérifier le statut après chargement
-      const newStatus = getSenderStatus(from);
-      console.log(`📊 Nouveau statut de ${from}:`, newStatus);
-
-      if (!newStatus.ready) {
-        return res.status(500).json({
-          error: `WhatsApp non prêt après chargement: ${newStatus.status}`,
-          from: from,
-          to: to,
-          status: newStatus.status,
-        });
-      }
-    } catch (loadError) {
-      console.error(`❌ Erreur chargement session ${from}:`, loadError.message);
-      return res.status(500).json({
-        error: `Session non chargée: ${loadError.message}`,
-        from: from,
-        to: to,
-      });
-    }
-  }
-
-  // Vérifier le statut final
-  const finalStatus = getSenderStatus(from);
-  console.log(`📊 Statut final de ${from}:`, finalStatus);
-
-  if (!finalStatus.ready || !finalStatus.authenticated) {
-    return res.status(500).json({
-      error: `WhatsApp non prêt: ${finalStatus.status}`,
-      from: from,
-      to: to,
-      status: finalStatus.status,
-      ready: finalStatus.ready,
-      authenticated: finalStatus.authenticated,
-    });
-  }
-
-  console.log(`✅ ${from} est connecté, envoi du message...`);
-  const result = await sendMessage({ to, text, attachments, from });
-
-  res.json({
-    success: true,
-    message: "Message envoyé avec succès!",
-    from: result.from,
-    to: result.to,
-    timestamp: new Date().toISOString(),
-  });
-  /*} catch (err) {
-    console.error(`❌ Erreur envoi depuis ${from} vers ${to}:`, err.message);
-    res.status(500).json({
-      error: err.message,
-      from: from,
-      to: to,
-      timestamp: new Date().toISOString(),
-    });*/
-  //  }
-});
 
 // 8️⃣ LISTER TOUS LES SENDERS CONNECTÉS
 app.get("/senders", async (req, res) => {

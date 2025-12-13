@@ -3,20 +3,14 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 
-// Chemin du fichier de sauvegarde
-const AUTH_STATE_FILE = path.join(__dirname, "authState.json");
-
-// Charger l'état au démarrage
-let authState = new Map();
-
 const MAX_ACTIVE_CLIENTS = parseInt(process.env.MAX_ACTIVE_CLIENTS) || 10;
 const SESSION_TIMEOUT = 30 * 60 * 1000;
 
 // 📦 GESTIONNAIRE CLIENTS CORRIGÉ
 class WhatsAppClientManager {
   constructor() {
-    this.clients = new Map(); // phoneNumber -> client
-    this.clientStates = new Map(); // phoneNumber -> state
+    this.clients = new Map();
+    this.clientStates = new Map();
     this.sessionPath = path.join(__dirname, "whatsapp-sessions");
     this.initializationLocks = new Map();
     this.qrGenerationLocks = new Map();
@@ -28,94 +22,93 @@ class WhatsAppClientManager {
       fs.mkdirSync(this.sessionPath, { recursive: true });
     }
 
-    setInterval(() => this.cleanupInactiveClients(), 5 * 60 * 1000);
+    // 🔥 LOG REDUCED: De 5min à 15min pour moins de vérifications
+    setInterval(() => this.cleanupInactiveClients(), 15 * 60 * 1000);
+
+    // 🔥 PRÉ-CHARGEMENT DE CHROME
+    this.preloadChrome();
   }
 
   /**
-   * 🚀 Initialiser client par numéro
+   * ⚡ Pré-charger Chrome pour accélérer les démarrages
+   */
+  async preloadChrome() {
+    try {
+      // Recherche silencieuse de Chrome
+      const possiblePaths = [
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+      ];
+
+      for (const chromePath of possiblePaths) {
+        if (fs.existsSync(chromePath)) {
+          this.chromePath = chromePath;
+          break; // Premier trouvé
+        }
+      }
+    } catch {
+      // Silencieux en cas d'erreur
+    }
+  }
+
+  /**
+   * 🚀 Initialiser client (OPTIMISÉ)
    */
   async initializeClient(phoneNumber, userId = null) {
     const clientKey = phoneNumber;
 
-    // 🔒 Si un client est déjà en cours d'initialisation → on attend
+    // 🔒 Lock optimisé avec timeout
     if (this.initializationLocks.has(clientKey)) {
-      console.log(`⏳ [${phoneNumber}] Initialisation déjà en cours...`);
-
-      return new Promise((resolve) => {
-        const waitForInit = () => {
-          const client = this.clients.get(clientKey);
-          const state = this.clientStates.get(clientKey);
-
-          if (client && state?.initialized) {
-            resolve(client);
-          } else {
-            setTimeout(waitForInit, 300);
-          }
-        };
-        waitForInit();
-      });
+      return this.waitForExistingClient(clientKey);
     }
 
-    // Marquage pour éviter double init
     this.initializationLocks.set(clientKey, true);
+    const startTime = Date.now();
 
     try {
-      // 🟢 Vérification du client existant
+      // Client existant et sain
       const existingClient = this.clients.get(clientKey);
-
       if (existingClient && (await this.isClientHealthy(clientKey))) {
-        console.log(`♻️ [${phoneNumber}] Client actif réutilisé`);
         this.updateSessionActivity(clientKey);
         return existingClient;
       }
 
-      // 🔥 Trop de clients actifs ? → on en désactive un
+      // Gestion limite clients
       if (this.clients.size >= MAX_ACTIVE_CLIENTS) {
         await this.deactivateOldestClient();
       }
 
-      console.log(
-        `🆕 [${phoneNumber}] Création d'un nouveau client WhatsApp...`
-      );
-      // ✅ Configuration Puppeteer corrigée
+      // 🔥 OPTIONS PUPPETEER ULTRA-OPTIMISÉES
       const puppeteerOptions = {
-        headless: true,
+        headless: "new",
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--no-first-run",
           "--single-process",
-          "--disable-gpu",
-          "--disable-web-security",
-          "--disable-features=site-per-process",
-          "--disable-ipc-flooding-protection",
-          "--disable-renderer-backgrounding",
-          "--disable-background-timer-throttling",
-          "--disable-client-side-phishing-detection",
-          "--disable-default-apps",
+          "--no-zygote", // ⚡ DÉMARRAGE RAPIDE
           "--disable-extensions",
-          "--disable-hang-monitor",
-          "--disable-prompt-on-repost",
-          "--disable-sync",
-          "--disable-translate",
-          "--metrics-recording-only",
-          "--safebrowsing-disable-auto-update",
+          "--disable-default-apps",
+          "--mute-audio",
           "--disable-backgrounding-occluded-windows",
           "--disable-breakpad",
-          "--disable-component-extensions-with-background-pages",
           "--disable-software-rasterizer",
-          "--mute-audio",
+          "--disable-blink-features=AutomationControlled",
+          "--disable-features=IsolateOrigins",
         ],
+        timeout: 10000, // ⚡ 10s max au lieu de 15s
         ignoreHTTPSErrors: true,
+        dumpio: false,
       };
 
-      // ✅ Add Chrome executable path if found
       if (this.chromePath) {
         puppeteerOptions.executablePath = this.chromePath;
       }
 
-      // 🆕 Nouveau client
+      // Nouveau client
       const client = new Client({
         authStrategy: new LocalAuth({
           clientId: phoneNumber,
@@ -123,10 +116,12 @@ class WhatsAppClientManager {
         }),
         puppeteer: puppeteerOptions,
         restartOnAuthFail: true,
-        takeoverOnConflict: true,
-        qrMaxRetries: 3,
+        takeoverOnConflict: false, // ⚡ Désactivé pour performance
+        qrMaxRetries: 2, // ⚡ Réduit de 3 à 2
+        skipSignalsHandling: true, // Cette option peut exister selon la version
       });
-      // 🗄️ État interne
+
+      // État initial
       this.clientStates.set(clientKey, {
         ready: false,
         qr: null,
@@ -134,138 +129,138 @@ class WhatsAppClientManager {
         lastActivity: Date.now(),
         initialized: false,
         qrGenerated: false,
+        debitDone: false,
       });
 
-      // 📡 Écouteurs d'événements
-      this.setupEventHandlers(client, clientKey);
+      // Handlers optimisés
+      this.setupOptimizedEventHandlers(client, clientKey);
 
-      // 🚀 Initialisation du client
+      // Initialisation avec timeout réduit
       await client.initialize();
 
-      // Le client est maintenant officiellement prêt à être utilisé
       this.clientStates.get(clientKey).initialized = true;
-
-      // On enregistre ce client
       this.clients.set(clientKey, client);
       this.updateSessionActivity(clientKey);
 
       return client;
     } finally {
-      // Libère le lock après un court délai
-      setTimeout(() => this.initializationLocks.delete(clientKey), 1500);
+      // Libération rapide du lock
+      setTimeout(() => this.initializationLocks.delete(clientKey), 500);
     }
   }
 
+  getAllAvailableSessions() {
+    const sessionsDir = this.sessionPath;
+    const allSessions = [];
+
+    try {
+      if (fs.existsSync(sessionsDir)) {
+        const folders = fs.readdirSync(sessionsDir);
+
+        folders.forEach((folder) => {
+          if (folder.startsWith("session-user_")) {
+            const phoneNumber = folder.replace("session-", "");
+            const state = this.clientStates.get(phoneNumber);
+            const existsInMemory = this.clients.has(phoneNumber);
+
+            allSessions.push({
+              phoneNumber: phoneNumber,
+              folderName: folder,
+              existsInMemory: existsInMemory,
+              ready: true,
+              authenticated: state?.authenticated || false,
+              hasQR: true,
+              lastActivity: state?.lastActivity || null,
+              status: state
+                ? state.ready
+                  ? "authenticated"
+                  : state.qr
+                  ? "qr_ready"
+                  : "waiting"
+                : "not_loaded",
+            });
+          }
+        });
+      }
+    } catch (error) {
+      console.error("❌ Erreur scan sessions:", error);
+    }
+
+    return allSessions;
+  }
   /**
-   * 🎯 Configuration des événements
+   * ⚡ Attente client existant (OPTIMISÉ)
    */
-  setupEventHandlers(client, clientKey) {
+  async waitForExistingClient(clientKey) {
+    return new Promise((resolve) => {
+      let checks = 0;
+      const maxChecks = 10; // ⚡ 3 secondes max
+
+      const checkInterval = setInterval(() => {
+        checks++;
+        const client = this.clients.get(clientKey);
+        const state = this.clientStates.get(clientKey);
+
+        if (client && state?.initialized) {
+          clearInterval(checkInterval);
+          resolve(client);
+        } else if (checks >= maxChecks) {
+          clearInterval(checkInterval);
+          resolve(null); // Timeout
+        }
+      }, 300);
+    });
+  }
+
+  /**
+   * ⚡ Handlers événements optimisés (MOINS DE LOGS)
+   */
+  setupOptimizedEventHandlers(client, clientKey) {
     const state = this.clientStates.get(clientKey);
 
-    client.on("qr", (qr) => {
-      if (state.qrGenerated) {
-        console.log(`⚠️ [${clientKey}] QR déjà généré - Ignoré`);
-        return;
+    // QR handler minimal
+    client.once("qr", (qr) => {
+      if (!state.qrGenerated) {
+        state.qr = qr;
+        state.qrGenerated = true;
+        state.lastActivity = Date.now();
       }
-
-      console.log(`📱 [${clientKey}] QR code généré`);
-      state.qr = qr;
-      state.ready = false;
-      state.authenticated = false;
-      state.qrGenerated = true;
-      state.lastActivity = Date.now();
-      // 🆕 Marquer que c'est une NOUVELLE session
-      state.debitDone = false;
     });
 
-    async function loadAuthState() {
-      try {
-        const data = await fs.readFile(AUTH_STATE_FILE, "utf8");
-        const saved = JSON.parse(data);
-        authState = new Map(Object.entries(saved));
-        console.log("✅ État auth chargé:", Array.from(authState.keys()));
-      } catch (error) {
-        if (error.code === "ENOENT") {
-          await fs.writeFile(AUTH_STATE_FILE, "{}");
-          console.log("📁 Fichier authState.json créé");
-        } else {
-          console.error("❌ Erreur chargement authState:", error.message);
-        }
-      }
-    }
+    // Ready handler optimisé
+    client.once("ready", async () => {
+      // Récupération numéro réel (silencieuse)
+      let realPhoneNumber = null;
 
-    async function saveAuthState() {
-      try {
-        const data = JSON.stringify(Object.fromEntries(authState), null, 2);
-        await fs.writeFile(AUTH_STATE_FILE, data);
-      } catch (error) {
-        console.error("❌ Erreur sauvegarde authState:", error.message);
-      }
-    }
-
-    // Charger l'état au début
-    loadAuthState();
-
-    // VOTRE ÉVÉNEMENT AUTHENTIFIED MODIFIÉ
-    client.on("authenticated", async () => {
-
-    });
-
-client.on("ready", async () => {
-    console.log(`✅ [${clientKey}] WhatsApp PRÊT et COMPLÈTEMENT INITIALISÉ`);
-    
-    let realPhoneNumber = null;
-    
-    // Méthode 1: Via client.info (recommandé)
-    if (client.info && client.info.wid) {
-        // client.info.wid._serialized = "213798457017@s.whatsapp.net"
-        realPhoneNumber = client.info.wid.user; // "213798457017"
-        console.log(`📱 [${clientKey}] Numéro réel détecté: ${realPhoneNumber}`);
-    }
-    
-    // Méthode 2: Via getMe() (alternative)
-    if (!realPhoneNumber && client.getMe) {
+      if (client.info?.wid) {
+        realPhoneNumber = client.info.wid.user;
+      } else if (client.getMe) {
         try {
-            const me = await client.getMe();
-            if (me && me.id) {
-                realPhoneNumber = me.id.user || me.id._serialized.split('@')[0];
-                console.log(`📱 [${clientKey}] Numéro via getMe(): ${realPhoneNumber}`);
-            }
-        } catch (error) {
-            console.warn(`⚠️ getMe() échoué:`, error.message);
-        }
-    }
-    
-    // Stocker dans l'état
-    if (realPhoneNumber) {
-        state.real_phone_number = realPhoneNumber;
-        console.log(`💾 [${clientKey}] Numéro réel stocké: ${realPhoneNumber}`);
-    } else {
-        console.warn(`⚠️ [${clientKey}] Impossible d'obtenir le numéro réel, utiliser virtuel`);
-    }
-    
-    // VOTRE LOGIQUE DE DÉBIT - ICI !
-    if (!state.debitDone) {
-        state.debitDone = true;
-        console.log(`💰 [${clientKey}] Débit avec numéro: ${realPhoneNumber || clientKey}`);
-        
-        // Appeler votre API
-        await this.debitQrCodeCount(clientKey, realPhoneNumber || null);
-    }
-    
-    // Mettre à jour l'état
-    state.ready = true;
-    state.authenticated = true;
-    state.lastActivity = Date.now();
-});
+          const me = await client.getMe();
+          realPhoneNumber = me?.id?.user || me?.id?._serialized?.split("@")[0];
+        } catch {}
+      }
 
-    client.on("auth_failure", (msg) => {
-      console.error(`❌ [${clientKey}] Échec auth:`, msg);
+      state.real_phone_number = realPhoneNumber;
+      state.ready = true;
+      state.authenticated = true;
+      state.lastActivity = Date.now();
+      console.log(`✅ [${clientKey}] WhatsApp prêt et authentifié.`);
+      // Débit silencieux
+      if (!state.debitDone) {
+        state.debitDone = true;
+        this.debitQrCodeCount(clientKey, realPhoneNumber || null).catch(
+          () => {}
+        );
+      }
+    });
+
+    // Error handlers (logs réduits)
+    client.on("auth_failure", () => {
       state.qrGenerated = false;
     });
 
-    client.on("disconnected", (reason) => {
-      console.warn(`⚠️ [${clientKey}] Déconnecté:`, reason);
+    client.on("disconnected", () => {
       state.ready = false;
       state.authenticated = false;
       state.qrGenerated = false;
@@ -273,120 +268,78 @@ client.on("ready", async () => {
   }
 
   /**
-   * 🔍 GÉNÉRER QR CODE
+   * ⚡ Génération QR optimisée
    */
   async generateNewQR(phoneNumber, userId = null) {
+    // Éviter les doublons
     if (this.qrGenerationLocks.has(phoneNumber)) {
-      console.log(`⏳ [${phoneNumber}] QR déjà en cours de génération...`);
-      return new Promise((resolve, reject) => {
-        const checkQR = () => {
-          const state = this.clientStates.get(phoneNumber);
-          if (state && state.qr) {
-            resolve({
-              qr: state.qr,
-              status: "qr_ready",
-              ready: false,
-              message: "QR déjà disponible",
-            });
-          } else if (state && state.ready) {
-            resolve({
-              status: "authenticated",
-              message: "Déjà authentifié",
-              ready: true,
-            });
-          } else if (!this.qrGenerationLocks.has(phoneNumber)) {
-            reject(new Error("Échec génération QR"));
-          } else {
-            setTimeout(checkQR, 1000);
-          }
-        };
-        state.debitDone = true;
-        checkQR();
-      });
+      return this.waitForExistingQR(phoneNumber);
     }
 
     this.qrGenerationLocks.set(phoneNumber, true);
-    console.log(`🎯 [${phoneNumber}] Demande QR code pour user ${userId}...`);
+    const startTime = Date.now();
 
     try {
       const state = this.clientStates.get(phoneNumber);
 
-      if (state && state.ready && state.authenticated) {
-        console.log(`✅ [${phoneNumber}] Déjà authentifié`);
-        if (userId) {
-          await this.associatePhoneWithUser(userId, phoneNumber);
-        }
-        return {
-          status: "authenticated",
-          message: "WhatsApp déjà connecté",
-          ready: true,
-        };
+      // Vérifications rapides
+      if (state?.ready && state?.authenticated) {
+        if (userId) await this.associatePhoneWithUser(userId, phoneNumber);
+        return { status: "authenticated", ready: true };
       }
 
-      if (state && state.qr) {
-        console.log(`📱 [${phoneNumber}] QR déjà disponible`);
-        if (userId) {
-          await this.associatePhoneWithUser(userId, phoneNumber);
-        }
-        return {
-          qr: state.qr,
-          status: "qr_ready",
-          ready: false,
-          message: "Scannez ce QR",
-        };
+      if (state?.qr) {
+        if (userId) await this.associatePhoneWithUser(userId, phoneNumber);
+        return { qr: state.qr, status: "qr_ready", ready: false };
       }
 
+      // Initialisation client
       await this.initializeClient(phoneNumber, userId);
+      if (userId) await this.associatePhoneWithUser(userId, phoneNumber);
 
-      if (userId) {
-        await this.associatePhoneWithUser(userId, phoneNumber);
-      }
-
+      // Attente QR avec timeout réduit
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error("QR non généré après 30s"));
-        }, 30000);
+          reject(new Error("QR timeout"));
+        }, 15000); // ⚡ 15s au lieu de 30s
 
-        const checkQR = () => {
+        let checks = 0;
+        const checkInterval = setInterval(() => {
+          checks++;
           const currentState = this.clientStates.get(phoneNumber);
 
-          if (currentState && currentState.qr) {
+          if (currentState?.qr) {
+            clearInterval(checkInterval);
             clearTimeout(timeout);
-            console.log(
-              `✅ [${phoneNumber}] QR généré avec succès pour user x ${userId}`
-            );
             resolve({
               qr: currentState.qr,
               status: "qr_ready",
               ready: false,
-              message: "Scannez ce QR avec WhatsApp",
             });
-          } else if (currentState && currentState.ready) {
+          } else if (currentState?.ready) {
+            clearInterval(checkInterval);
             clearTimeout(timeout);
-            console.log(
-              `✅ [${phoneNumber}] Déjà authentifié pendant l'attente`
-            );
             resolve({
               status: "authenticated",
-              message: "WhatsApp déjà connecté",
               ready: true,
             });
-          } else {
-            setTimeout(checkQR, 1000);
+          } else if (checks > 30) {
+            // ⚡ 30 checks max
+            clearInterval(checkInterval);
+            clearTimeout(timeout);
+            reject(new Error("Max checks reached"));
           }
-        };
-
-        checkQR();
+        }, 500); // ⚡ Vérification toutes les 500ms
       });
     } catch (error) {
-      console.error(`❌ [${phoneNumber}] Erreur génération QR:`, error.message);
       throw error;
     } finally {
       setTimeout(() => {
         this.qrGenerationLocks.delete(phoneNumber);
-      }, 2000);
+      }, 1000);
     }
   }
+
   async generateNewQRPhone(phoneNumber, userId = null) {
     if (this.qrGenerationLocks.has(phoneNumber)) {
       console.log(`⏳ [${phoneNumber}] QR déjà en cours de génération...`);
@@ -500,252 +453,142 @@ client.on("ready", async () => {
   }
 
   /**
-   * 📨 ENVOYER MESSAGE - CORRIGÉ
+   * ⚡ Attente QR existant
    */
+  async waitForExistingQR(phoneNumber) {
+    return new Promise((resolve) => {
+      let checks = 0;
+
+      const checkInterval = setInterval(() => {
+        checks++;
+        const state = this.clientStates.get(phoneNumber);
+
+        if (state?.qr) {
+          clearInterval(checkInterval);
+          resolve({
+            qr: state.qr,
+            status: "qr_ready",
+            ready: false,
+            message: "QR déjà disponible",
+          });
+        } else if (state?.ready) {
+          clearInterval(checkInterval);
+          resolve({
+            status: "authenticated",
+            message: "Déjà authentifié",
+            ready: true,
+          });
+        } else if (checks > 20) {
+          // 10 secondes max
+          clearInterval(checkInterval);
+          resolve({ status: "timeout", ready: false });
+        }
+      }, 500);
+    });
+  }
+
   /**
-   * 📨 ENVOYER MESSAGE - CORRIGÉ ET COMPLET
+   * ⚡ Envoi message optimisé
    */
   async sendMessage(messageData) {
     const { to, text, attachments, from } = messageData;
     const clientKey = from;
 
-    console.log(`📩 Envoi message à ${to} depuis ${clientKey}...`);
-
     try {
-      // ✅ Vérifier et initialiser le client si nécessaire
+      // Client check optimisé
       if (
         !this.clients.has(clientKey) ||
         !(await this.isClientHealthy(clientKey))
       ) {
-        console.log(`🔄 Client ${clientKey} non trouvé, initialisation...`);
         await this.initializeClient(from);
       }
 
-      // ✅ Vérifier à nouveau après initialisation
-      if (!this.clients.has(clientKey)) {
-        throw new Error(
-          `Client ${clientKey} non disponible après initialisation`
-        );
-      }
-
       const client = this.clients.get(clientKey);
+      if (!client) throw new Error(`Client non disponible`);
 
-      if (!client) {
-        throw new Error(`Client WhatsApp non disponible pour ${from}`);
-      }
-
-      // Vérifier si le client est prêt
       const state = this.clientStates.get(clientKey);
-      if (!state || !state.ready || !state.authenticated) {
-        throw new Error(
-          `WhatsApp non connecté sur ${from}. Statut: ${
-            state?.status || "non initialisé"
-          }`
-        );
+      if (!state?.ready || !state?.authenticated) {
+        throw new Error(`WhatsApp non connecté`);
       }
 
-      console.log(`✅ Client ${clientKey} prêt, envoi du message...`);
-
-      // ✅ FORMATER LE NUMÉRO (TRÈS IMPORTANT)
-      const formattedTo = to;
-      console.log(`🔍 Numéro formaté: ${to} → ${formattedTo}`);
-
-      // ✅ VÉRIFIER LE NUMÉRO SUR WHATSAPP
-      console.log(`🔍 Vérification numéro ${formattedTo} sur WhatsApp...`);
-      const numberDetails = await client.getNumberId(formattedTo);
-      console.log(
-        `✅ Détails du numéro obtenus:`,
-        numberDetails ? "Numéro valide" : "Numéro invalide"
-      );
-
+      // Vérification numéro
+      const numberDetails = await client.getNumberId(to);
       if (!numberDetails) {
-        console.log(
-          `⚠️ Numéro ${formattedTo} non enregistré sur WhatsApp, ignoré`
-        );
         return {
           success: false,
-          to: formattedTo,
+          to,
           from,
           skipped: true,
-          reason: "Numéro non enregistré sur WhatsApp",
+          reason: "Numéro non enregistré",
           timestamp: new Date().toISOString(),
         };
       }
 
       const chatId = numberDetails._serialized;
-      console.log(`💬 Chat ID: ${chatId}`);
-
-      // ✅ ENVOYER LE MESSAGE
       let messageResult;
 
-      if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-        console.log(`📎 Envoi avec ${attachments.length} pièce(s) jointe(s)`);
+      // Envoi selon type
+      if (attachments?.length > 0) {
         for (const attachment of attachments) {
           const media = await this.createMediaFromAttachment(attachment);
           messageResult = await client.sendMessage(chatId, media, {
             caption: text,
           });
-          console.log(`✅ Fichier envoyé: ${attachment.name || "sans nom"}`);
         }
       } else if (text) {
-        console.log(
-          `📝 Envoi texte: "${text.substring(0, 50)}${
-            text.length > 50 ? "..." : ""
-          }"`
-        );
         messageResult = await client.sendMessage(chatId, text);
       } else {
-        throw new Error(
-          "Aucun contenu à envoyer (texte ou pièces jointes requis)"
-        );
+        throw new Error("Aucun contenu à envoyer");
       }
 
-      // ✅ CONFIRMATION
       this.updateSessionActivity(clientKey);
-      console.log(
-        `✅ Message envoyé avec succès à ${formattedTo} depuis ${from}`
-      );
-
-      if (messageResult) {
-        console.log(`📨 ID du message: ${messageResult.id._serialized}`);
-      }
 
       return {
         success: true,
-        to: formattedTo,
+        to,
         from,
         messageId: messageResult?.id?._serialized,
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
-      console.error(
-        `❌ Erreur envoi message de ${from} vers ${to}:`,
-        error.message
-      );
-
-      // Relancer l'erreur avec plus de détails
       throw new Error(`Échec envoi: ${error.message}`);
     }
   }
 
   /**
-   * 🆕 MÉTHODE POUR FORMATER LES NUMÉROS
+   * ⚡ Débit optimisé (silencieux)
    */
-  formatPhoneNumber(phone) {
-    if (!phone) {
-      throw new Error("Numéro vide");
-    }
-
-    // Supprimer tous les caractères non numériques sauf le +
-    let cleaned = phone.replace(/[^\d+]/g, "");
-
-    // Si le numéro commence par 0, remplacer par l'indicatif Maroc
-    if (cleaned.startsWith("0")) {
-      cleaned = "+212" + cleaned.substring(1);
-    }
-    // Si le numéro commence par 6 ou 7 sans indicatif
-    else if (cleaned.match(/^[67]\d{8}$/)) {
-      cleaned = "+212" + cleaned;
-    }
-    // Si le numéro a l'indicatif sans +
-    else if (cleaned.startsWith("212")) {
-      cleaned = "+" + cleaned;
-    }
-    // Si le numéro n'a pas de +
-    else if (cleaned.match(/^\d{9,15}$/) && !cleaned.startsWith("+")) {
-      cleaned = "+" + cleaned;
-    }
-
-    // Vérifier le format final
-    if (!cleaned.match(/^\+\d{10,15}$/)) {
-      throw new Error(
-        `Format de numéro invalide: ${phone} → ${cleaned}. Format attendu: +212612345678`
-      );
-    }
-
-    return cleaned;
-  }
-
-  /**
-   * 🆕 CHARGER UNE SESSION EXISTANTE
-   */
-  async loadExistingSession(phoneNumber) {
-    const clientKey = phoneNumber;
-
-    if (
-      this.clients.has(clientKey) &&
-      (await this.isClientHealthy(clientKey))
-    ) {
-      return this.clients.get(clientKey);
-    }
-
-    const sessionFolder = path.join(this.sessionPath, `session-${phoneNumber}`);
-    if (!fs.existsSync(sessionFolder)) {
-      throw new Error(`Dossier session non trouvé: ${sessionFolder}`);
-    }
-
-    console.log(`🔄 Chargement session existante: ${phoneNumber}`);
-    return await this.initializeClient(phoneNumber);
-  }
-
-  /**
-   * 🆕 VÉRIFIER SI UNE SESSION EXISTE SUR LE DISQUE
-   */
-  sessionExistsOnDisk(phoneNumber) {
-    const sessionFolder = path.join(this.sessionPath, `session-${phoneNumber}`);
-    return fs.existsSync(sessionFolder);
-  }
-
-  /**
-   * 🆕 LISTER TOUTES LES SESSIONS DISPONIBLES (DISQUE + MÉMOIRE)
-   */
-  getAllAvailableSessions() {
-    const sessionsDir = this.sessionPath;
-    const allSessions = [];
-
+  async debitQrCodeCount(clientId, phoneNumber) {
     try {
-      if (fs.existsSync(sessionsDir)) {
-        const folders = fs.readdirSync(sessionsDir);
+      const userId = this.extractUserIdFromPhone(clientId);
 
-        folders.forEach((folder) => {
-          if (folder.startsWith("session-user_")) {
-            const phoneNumber = folder.replace("session-", "");
-            const state = this.clientStates.get(phoneNumber);
-            const existsInMemory = this.clients.has(phoneNumber);
-
-            allSessions.push({
-              phoneNumber: phoneNumber,
-              folderName: folder,
-              existsInMemory: existsInMemory,
-              ready: true,
-              authenticated: state?.authenticated || false,
-              hasQR: true,
-              lastActivity: state?.lastActivity || null,
-              status: state
-                ? state.ready
-                  ? "authenticated"
-                  : state.qr
-                  ? "qr_ready"
-                  : "waiting"
-                : "not_loaded",
-            });
-          }
-        });
-      }
+      if (!userId) return { success: false, error: "User ID non trouvé" };
+      console.log(`💸 Débit QR dz pour user ${userId}, client ${clientId}...`);
+      const response = await axios.post(
+        `${this.yiiApiUrl}/api/whatsapp-connected`,
+        `user_id=${userId}&secret=${encodeURIComponent(
+          this.yiiApiSecret
+        )}&phone_number=${encodeURIComponent(
+          phoneNumber || ""
+        )}&clientId=${encodeURIComponent(clientId)}`, // Changed from client_id to clientId
+        {
+          timeout: 3000, // ⚡ 3s max
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        }
+      );
+    
+      return response.data.success
+        ? { success: true }
+        : { success: false, error: response.data.error };
     } catch (error) {
-      console.error("❌ Erreur scan sessions:", error);
+      return { success: false, error: "Erreur réseau" };
     }
-
-    return allSessions;
   }
 
-  /**
-   * 🆕 ASSOCIER UN NUMÉRO À UN UTILISATEUR
-   */
+  // ⚡ MÉTHODES RESTANTES OPTIMISÉES (logs réduits)
+
   async associatePhoneWithUser(userId, phoneNumber) {
     try {
-      console.log(`🔗 Association ${phoneNumber} avec user ${userId}`);
-
       const response = await axios.post(
         `${this.yiiApiUrl}/api/whatsapp-connected`,
         {
@@ -753,44 +596,35 @@ client.on("ready", async () => {
           phone_number: phoneNumber,
           secret: this.yiiApiSecret,
         },
-        {
-          timeout: 5000,
-          headers: {
-            "Content-Type": "application/json",
-          },
-        }
+        { timeout: 3000, headers: { "Content-Type": "application/json" } }
       );
-
-      if (response.data.success) {
-        console.log(`✅ Association réussie: ${phoneNumber} -> user ${userId}`);
-        return response.data;
-      } else {
-        throw new Error(response.data.error || "Erreur association");
-      }
-    } catch (error) {
-      console.error(`❌ Erreur association ${phoneNumber}:`, error.message);
-      return { success: false, error: error.message };
+      return response.data;
+    } catch {
+      return { success: false, error: "Association échouée" };
     }
   }
 
   getSenderStatus(phoneNumber) {
     const state = this.clientStates.get(phoneNumber);
-    if (!state) {
-      return {
-        status: "not_initialized",
-        ready: false,
-        authenticated: false,
-        hasQR: false,
-        lastActivity: null,
-      };
-    }
-    return {
-      status: state.ready ? "authenticated" : state.qr ? "qr_ready" : "waiting",
-      ready: state.ready,
-      authenticated: state.authenticated,
-      hasQR: !!state.qr,
-      lastActivity: state.lastActivity,
-    };
+    return state
+      ? {
+          status: state.ready
+            ? "authenticated"
+            : state.qr
+            ? "qr_ready"
+            : "waiting",
+          ready: state.ready,
+          authenticated: state.authenticated,
+          hasQR: !!state.qr,
+          lastActivity: state.lastActivity,
+        }
+      : {
+          status: "not_initialized",
+          ready: false,
+          authenticated: false,
+          hasQR: false,
+          lastActivity: null,
+        };
   }
 
   async isClientHealthy(clientKey) {
@@ -804,9 +638,7 @@ client.on("ready", async () => {
     this.sessionQueue = this.sessionQueue.filter((id) => id !== clientKey);
     this.sessionQueue.push(clientKey);
     const state = this.clientStates.get(clientKey);
-    if (state) {
-      state.lastActivity = Date.now();
-    }
+    if (state) state.lastActivity = Date.now();
   }
 
   async disconnectClient(phoneNumber) {
@@ -814,10 +646,7 @@ client.on("ready", async () => {
     if (client) {
       try {
         await client.destroy();
-        console.log(`🔒 [${phoneNumber}] Client déconnecté`);
-      } catch (err) {
-        console.error(`❌ Erreur déconnexion ${phoneNumber}:`, err.message);
-      }
+      } catch {}
     }
     this.clients.delete(phoneNumber);
     this.clientStates.delete(phoneNumber);
@@ -828,16 +657,13 @@ client.on("ready", async () => {
 
   async deactivateOldestClient() {
     if (this.sessionQueue.length === 0) return;
-    const oldestPhone = this.sessionQueue[0];
-    console.log(`🧹 Désactivation client ancien: ${oldestPhone}`);
-    await this.disconnectClient(oldestPhone);
+    await this.disconnectClient(this.sessionQueue[0]);
   }
 
   async cleanupInactiveClients() {
     const now = Date.now();
     for (const [phoneNumber, state] of this.clientStates.entries()) {
       if (now - state.lastActivity > SESSION_TIMEOUT) {
-        console.log(`🧹 Nettoyage client inactif: ${phoneNumber}`);
         await this.disconnectClient(phoneNumber);
       }
     }
@@ -867,20 +693,15 @@ client.on("ready", async () => {
   }
 
   getConnectedSenders() {
-    const connectedSenders = [];
-    for (const [phoneNumber, state] of this.clientStates.entries()) {
-      if (state.ready && state.authenticated) {
-        connectedSenders.push(phoneNumber);
-      }
-    }
-    return connectedSenders;
+    return Array.from(this.clientStates.entries())
+      .filter(([_, state]) => state.ready && state.authenticated)
+      .map(([phoneNumber]) => phoneNumber);
   }
 
   getAllSessions() {
-    const allSessions = [];
-    for (const [phoneNumber, state] of this.clientStates.entries()) {
-      allSessions.push({
-        phoneNumber: phoneNumber,
+    return Array.from(this.clientStates.entries()).map(
+      ([phoneNumber, state]) => ({
+        phoneNumber,
         status: state.ready
           ? "authenticated"
           : state.qr
@@ -890,78 +711,31 @@ client.on("ready", async () => {
         authenticated: state.authenticated,
         hasQR: !!state.qr,
         lastActivity: state.lastActivity,
-      });
-    }
-    return allSessions;
+      })
+    );
   }
 
   getStats() {
     const readyClients = Array.from(this.clientStates.values()).filter(
       (state) => state.ready
     ).length;
+
     return {
       totalClients: this.clients.size,
       readyClients,
       authenticatedClients: readyClients,
       sessionQueueSize: this.sessionQueue.length,
-      memoryUsage: process.memoryUsage(),
       maxActiveClients: MAX_ACTIVE_CLIENTS,
     };
   }
 
   async shutdown() {
-    console.log("🛑 Arrêt gestionnaire WhatsApp...");
     for (const [phoneNumber] of this.clients) {
       await this.disconnectClient(phoneNumber);
     }
-    console.log("✅ Arrêt terminé");
   }
 
-  async debitQrCodeCount(clientId,phoneNumber) {
-    try {
-      console.log(`💰 [${phoneNumber}] Débit qrcode_count...`);
-
-      // 🆕 Extraire l'user_id du numéro virtuel
-      let userId = this.extractUserIdFromPhone(clientId);
-      console.log(`🔍 [${clientId}] ID utilisateur extrait: ${userId}`);
-      console.log(`${this.yiiApiUrl}/api/whatsapp-connected`);
-      const response = await axios.post(
-        `${this.yiiApiUrl}/api/whatsapp-connected`,
-        `user_id=${userId}&secret=${encodeURIComponent(
-          this.yiiApiSecret
-        )}&phone_number=${encodeURIComponent(phoneNumber)}`,
-
-        {
-          timeout: 5000,
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded", // 🆕
-          },
-        }
-      );
-      if (response.data.success) {
-        console.log(
-          `✅ [${phoneNumber}] Compte débité avec succès pour user ${userId}`
-        );
-        return response.data;
-      } else {
-        throw new Error(response.data.error || "Erreur débit");
-      }
-    } catch (error) {
-      console.error(`❌ [${phoneNumber}] Erreur API débit:`, error.message);
-      // 🆕 Afficher plus de détails
-      if (error.response) {
-        console.error(`📊 Status: ${error.response.status}`);
-        console.error(`📊 Data:`, error.response.data);
-      }
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * 🆕 Extraire l'ID utilisateur du numéro virtuel
-   */
   extractUserIdFromPhone(phoneNumber) {
-    // Format: "user_15_1763581264874" → extraire "15"
     const match = phoneNumber.match(/user_(\d+)_/);
     return match ? parseInt(match[1]) : null;
   }
@@ -990,6 +764,83 @@ async function loadSession(phoneNumber) {
   }
 }
 
+async function loadSessionBySession(sessionName) {
+      console.log(`🔄 Chargement de la session nommée: ${sessionName}...`);
+  try {
+    console.log(`🔄 Chargement de la session nommée: ${sessionName}...`);
+    
+    // Vérifier d'abord si c'est déjà en mémoire
+    const currentStatus = clientManager.getSenderStatus(sessionName);
+    
+    if (currentStatus.ready && currentStatus.authenticated) {
+      console.log(`✅ Session ${sessionName} déjà connectée en mémoire`);
+      return {
+        success: true,
+        sessionName: sessionName,
+        status: "authenticated",
+        ready: true,
+        alreadyConnected: true
+      };
+    }
+    
+    // Vérifier si une session existe sur le disque
+    const allSessions = clientManager.getAllAvailableSessions();
+    const sessionExistsOnDisk = allSessions.some(s => s.folderName === `session-${sessionName}`);
+    
+    if (!sessionExistsOnDisk) {
+      console.log(`⚠️ Session ${sessionName} n'existe pas sur le disque`);
+      
+      // Générer une NOUVELLE session avec ce nom
+      const qrResult = await clientManager.generateNewQRPhone(sessionName);
+      
+      return {
+        success: true,
+        sessionName: sessionName,
+        status: qrResult.status,
+        qrCode: qrResult.qr,
+        ready: qrResult.ready || false,
+        message: "Nouvelle session créée, scannez le QR code",
+        isNewSession: true
+      };
+    }
+    
+    // Session existe sur disque mais pas en mémoire
+    console.log(`📂 Session ${sessionName} existe sur disque, chargement...`);
+    
+    // Utiliser generateNewQRPhone qui gère le chargement automatique
+    const qrResult = await clientManager.generateNewQRPhone(sessionName);
+    
+    return {
+      success: true,
+      sessionName: sessionName,
+      status: qrResult.status,
+      qrCode: qrResult.qr,
+      ready: qrResult.ready || false,
+      message: qrResult.message,
+      loadedFromDisk: true
+    };
+    
+  } catch (error) {
+    console.error(`❌ Erreur chargement session ${sessionName}:`, error.message);
+    
+    // Si erreur de connexion, offrir un QR code comme alternative
+    try {
+      const qrResult = await clientManager.generateNewQRPhone(sessionName);
+      
+      return {
+        success: false,
+        sessionName: sessionName,
+        error: `Chargement échoué mais QR disponible: ${error.message}`,
+        fallbackQR: qrResult.qr,
+        status: qrResult.status,
+        ready: false
+      };
+    } catch (qrError) {
+      throw new Error(`Impossible de charger ou créer session ${sessionName}: ${error.message}`);
+    }
+  }
+}
+
 async function loadSessionIntoMemory(phoneNumber) {
   try {
     console.log(`🔄 Chargement session ${phoneNumber} en mémoire...`);
@@ -1010,7 +861,11 @@ async function loadSessionIntoMemory(phoneNumber) {
   }
 }
 
-// Gestion des signaux
+// 🎯 CORRECTION DUPLICATA
+//process.removeAllListeners("SIGINT");
+//process.removeAllListeners("SIGTERM");
+
+// Gestion des signaux (votre code existant reste inchangé)
 process.on("SIGINT", async () => {
   await clientManager.shutdown();
   process.exit(0);
@@ -1045,6 +900,7 @@ module.exports = {
   scanAllSessions,
   loadSessionIntoMemory,
   loadSession,
+  loadSessionBySession,
 
   // Classes WhatsApp
   Client,
