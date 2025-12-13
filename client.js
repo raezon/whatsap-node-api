@@ -77,6 +77,43 @@ class WhatsAppClientManager {
       console.log(
         `🆕 [${phoneNumber}] Création d'un nouveau client WhatsApp...`
       );
+  // ✅ Configuration Puppeteer corrigée
+      const puppeteerOptions = {
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--no-first-run",
+          "--single-process",
+          "--disable-gpu",
+          "--disable-web-security",
+          "--disable-features=site-per-process",
+          "--disable-ipc-flooding-protection",
+          "--disable-renderer-backgrounding",
+          "--disable-background-timer-throttling",
+          "--disable-client-side-phishing-detection",
+          "--disable-default-apps",
+          "--disable-extensions",
+          "--disable-hang-monitor",
+          "--disable-prompt-on-repost",
+          "--disable-sync",
+          "--disable-translate",
+          "--metrics-recording-only",
+          "--safebrowsing-disable-auto-update",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-breakpad",
+          "--disable-component-extensions-with-background-pages",
+          "--disable-software-rasterizer",
+          "--mute-audio"
+        ],
+        ignoreHTTPSErrors: true,
+      };
+
+      // ✅ Add Chrome executable path if found
+      if (this.chromePath) {
+        puppeteerOptions.executablePath = this.chromePath;
+      }
 
       // 🆕 Nouveau client
       const client = new Client({
@@ -84,20 +121,11 @@ class WhatsAppClientManager {
           clientId: phoneNumber,
           dataPath: this.sessionPath,
         }),
-        puppeteer: {
-          headless: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--single-process",
-            "--disable-gpu",
-          ],
-        },
+        puppeteer: puppeteerOptions,
         restartOnAuthFail: true,
+        takeoverOnConflict: true,
+        qrMaxRetries: 3,
       });
-
       // 🗄️ État interne
       this.clientStates.set(clientKey, {
         ready: false,
@@ -300,7 +328,7 @@ class WhatsAppClientManager {
           if (currentState && currentState.qr) {
             clearTimeout(timeout);
             console.log(
-              `✅ [${phoneNumber}] QR généré avec succès pour user ${userId}`
+              `✅ [${phoneNumber}] QR généré avec succès pour user x ${userId}`
             );
             resolve({
               qr: currentState.qr,
@@ -411,7 +439,7 @@ class WhatsAppClientManager {
           if (currentState && currentState.qr) {
             clearTimeout(timeout);
             console.log(
-              `✅ [${phoneNumber}] QR généré avec succès pour user ${userId}`
+              `✅ [${phoneNumber}] QR généré avec succès pour user xx ${userId}`
             );
             resolve({
               qr: currentState.qr,

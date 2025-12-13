@@ -17,6 +17,7 @@ const {
   Buttons,
   loadSession,
   MessageMedia,
+  clientManager
 } = require("./client");
 
 const app = express();
@@ -131,16 +132,20 @@ const YII_API_SECRET = process.env.YII_API_SECRET || "my_very_secret_key_123";
 
 app.use((req, res, next) => {
 const allowedOrigins = [
-      "http://localhost:8080",
-      "http://localhost:3000",
-      "http://localhost:4000",
-      "http://148.230.116.113:8000",
-      "http://148.230.116.113:4000",
-      "https://148.230.116.113:8000",
-      "https://148.230.116.113:4000",
-      "https://tickets.voyage-test.xyz",
-      "http://tickets.voyage-test.xyz",
-    ];
+  "http://13.38.17.55:8080", // VOTRE FRONTEND
+  "http://13.38.17.55:4000", // VOTRE API  
+  "https://13.38.17.55:8080",
+  "https://13.38.17.55:4000",
+  "http://localhost:8080",
+  "http://localhost:3000",
+  "http://localhost:4000",
+  "http://148.230.116.113:8000",
+  "http://148.230.116.113:4000",
+  "https://148.230.116.113:8000",
+  "https://148.230.116.113:4000", 
+  "https://tickets.voyage-test.xyz",
+  "http://tickets.voyage-test.xyz"
+];
   const origin = req.headers.origin;
 
   if (allowedOrigins.includes(origin)) {
@@ -239,7 +244,7 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
       console.log(`📱 Génération QR avec numéro virtuel: ${phoneNumber}`);
 
       // Générer le QR Code avec ce numéro virtuel
-      const qrResult = await generateNewQR(phoneNumber);
+      const qrResult = await generateNewQR(phoneNumber,userId);
 
       if (qrResult.status === "authenticated") {
         return {
@@ -284,7 +289,7 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
 a specific user ID. Here is a breakdown of what the code does: */
 app.get("/user/:userId/phones", async (req, res) => {
   const { userId } = req.params;
-  console.log(`📞 Recherche sessions pour user ${userId}`);
+  console.log(`🔍 Récupération phones pour user ${userId}`);
 
   try {
     const allSessionsOnDisk = scanAllSessions();
@@ -294,9 +299,7 @@ app.get("/user/:userId/phones", async (req, res) => {
       session.phoneNumber.includes(`user_${userId}_`)
     );
 
-    console.log(
-      `🎯 ${userSessionsOnDisk.length} sessions pour user ${userId} sur disque`
-    );
+    console.log(`🎯 ${userSessionsOnDisk.length} sessions pour user ${userId} sur disque`);
 
     // 🆕 GÉNÉRATION AUTOMATIQUE SI AUCUNE SESSION
     if (userSessionsOnDisk.length === 0) {
@@ -305,7 +308,6 @@ app.get("/user/:userId/phones", async (req, res) => {
       const phoneNumber = `user_${userId}_${Date.now()}`;
       console.log(`📱 Création nouvelle session: ${phoneNumber}`);
       
-      // Générer le QR code
       const qrResult = await generateNewQR(phoneNumber, userId);
       
       if (qrResult && qrResult.qr) {
@@ -316,7 +318,6 @@ app.get("/user/:userId/phones", async (req, res) => {
           action: "created",
           status: qrResult.status,
           qrImage: qrResult.qr,
-          qrRaw: qrResult.qr,
           message: qrResult.message || "Scannez ce QR avec WhatsApp",
           ready: qrResult.ready || false,
           user_id: userId,
@@ -328,34 +329,60 @@ app.get("/user/:userId/phones", async (req, res) => {
       }
     }
 
-    // 📋 TRAITEMENT DES SESSIONS EXISTANTES (votre logique originale)
+    // 📋 TRAITEMENT DES SESSIONS EXISTANTES
     const finalSessions = [];
 
     for (const session of userSessionsOnDisk) {
       try {
-        console.log(`🔄 Traitement session: ${session.phoneNumber}`);
+        console.log(`\n🔄 Traitement session: ${session.phoneNumber}`);
 
-        if (!session.existsInMemory) {
+        let client = clientManager.clients.get(session.phoneNumber);
+        const currentStatus = getSenderStatus(session.phoneNumber);
+        
+        console.log(`📊 Statut session: ${currentStatus.status}`);
+        console.log(`✅ Authentifié: ${currentStatus.authenticated}`);
+        console.log(`🚀 Ready: ${currentStatus.ready}`);
+
+        // Si le client n'est pas en mémoire, le charger
+        if (!client && !currentStatus.ready) {
           console.log(`📥 Chargement ${session.phoneNumber} en mémoire...`);
           await generateNewQRPhone(session.phoneNumber);
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          client = clientManager.clients.get(session.phoneNumber);
         }
 
-        const currentStatus = getSenderStatus(session.phoneNumber);
-
-        // 🆕 CORRECTION: Utiliser client.info instead of client.getMe()
         let realPhoneNumber = null;
-        try {
-          const { clientManager } = require("./client");
-          const client = clientManager.clients.get(session.phoneNumber);
-          if (client && currentStatus.ready && client.info) {
+        let clientState = "unknown";
+        let clientInfoAvailable = false;
+
+        if (client) {
+          clientState = client.state || "no_state";
+          console.log(`🤖 État client: ${clientState}`);
+          console.log(`📁 client.info existe: ${!!client.info}`);
+          
+          // Méthode 1: Vérifier directement client.info
+          if (client.info && client.info.wid) {
             realPhoneNumber = client.info.wid.user;
-            console.log(`📱 Vrai numéro détecté: ${realPhoneNumber}`);
+            clientInfoAvailable = true;
+            console.log(`✅ Numéro via client.info: ${realPhoneNumber}`);
+          } 
+          // Méthode 2: Si client.info n'est pas disponible mais la session est ready
+          else if (currentStatus.ready && currentStatus.authenticated) {
+            console.log(`⏳ Session ready mais client.info manquant, tentative récupération...`);
+            
+            // Attendre que client.info soit peuplé
+            realPhoneNumber = await waitForClientInfoWithTimeout(client, session.phoneNumber, 5000);
+            
+            if (realPhoneNumber) {
+              console.log(`✅ Numéro après attente: ${realPhoneNumber}`);
+            } else {
+              // Essayer d'autres méthodes
+              realPhoneNumber = await tryAlternativePhoneNumberMethods(client, session.phoneNumber);
+            }
           }
-        } catch (error) {
-          console.log(
-            `⚠️ Impossible de récupérer le vrai numéro: ${error.message}`
-          );
+          
+          // Debug: Afficher toutes les propriétés du client
+          console.log(`🔍 Propriétés client disponibles:`, Object.keys(client).filter(k => !k.startsWith('_')).join(', '));
         }
 
         finalSessions.push({
@@ -368,18 +395,14 @@ app.get("/user/:userId/phones", async (req, res) => {
           lastActivity: currentStatus.lastActivity,
           user_id: userId,
           folder_name: session.folderName,
+          client_state: clientState,
+          client_info_available: clientInfoAvailable
         });
 
-        console.log(
-          `✅ ${session.phoneNumber} - Statut: ${
-            currentStatus.status
-          } - Vrai: ${realPhoneNumber || "Non détecté"}`
-        );
+        console.log(`✅ ${session.phoneNumber} - Statut: ${currentStatus.status} - Vrai: ${realPhoneNumber || "Non détecté"}`);
+
       } catch (sessionError) {
-        console.error(
-          `❌ Erreur sur ${session.phoneNumber}:`,
-          sessionError.message
-        );
+        console.error(`❌ Erreur sur ${session.phoneNumber}:`, sessionError.message);
         finalSessions.push({
           phone_number: session.phoneNumber,
           real_phone_number: null,
@@ -397,18 +420,13 @@ app.get("/user/:userId/phones", async (req, res) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    console.log(
-      `✅ ${finalSessions.length} sessions traitées pour user ${userId}`
-    );
+    console.log(`\n✅ ${finalSessions.length} sessions traitées pour user ${userId}`);
 
-    const readySessions = finalSessions.filter(
-      (s) => s.ready && s.authenticated
-    );
+    // Résumé
+    const readySessions = finalSessions.filter((s) => s.ready && s.authenticated);
     const qrSessions = finalSessions.filter((s) => s.hasQR && !s.ready);
     const errorSessions = finalSessions.filter((s) => s.status === "error");
-    const sessionsWithRealNumber = finalSessions.filter(
-      (s) => s.real_phone_number
-    );
+    const sessionsWithRealNumber = finalSessions.filter((s) => s.real_phone_number);
 
     res.json({
       success: true,
@@ -427,10 +445,7 @@ app.get("/user/:userId/phones", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    console.error(
-      `❌ Erreur récupération sessions pour user ${userId}:`,
-      err.message
-    );
+    console.error(`❌ Erreur récupération sessions pour user ${userId}:`, err.message);
     res.status(500).json({
       success: false,
       error: err.message,
@@ -438,6 +453,138 @@ app.get("/user/:userId/phones", async (req, res) => {
     });
   }
 });
+
+// Fonctions utilitaires à ajouter
+async function waitForClientInfoWithTimeout(client, phoneNumber, timeout = 5000) {
+  return new Promise((resolve) => {
+    console.log(`⏳ Attente client.info pour ${phoneNumber} (${timeout}ms)`);
+    
+    // Si déjà disponible
+    if (client.info && client.info.wid) {
+      return resolve(client.info.wid.user);
+    }
+    
+    const timeoutId = setTimeout(() => {
+      console.log(`⏱️ Timeout attente client.info pour ${phoneNumber}`);
+      client.removeListener('ready', onReady);
+      resolve(null);
+    }, timeout);
+    
+    const onReady = () => {
+      console.log(`✅ ${phoneNumber} ready event reçu`);
+      clearTimeout(timeoutId);
+      
+      // Donner un peu de temps pour que client.info soit peuplé
+      setTimeout(() => {
+        if (client.info && client.info.wid) {
+          console.log(`📱 Numéro disponible après ready: ${client.info.wid.user}`);
+          resolve(client.info.wid.user);
+        } else {
+          console.log(`⚠️ client.info toujours undefined après ready`);
+          resolve(null);
+        }
+      }, 1000);
+    };
+    
+    client.once('ready', onReady);
+    
+    // Vérifier aussi périodiquement
+    const checkInterval = setInterval(() => {
+      if (client.info && client.info.wid) {
+        clearInterval(checkInterval);
+        clearTimeout(timeoutId);
+        client.removeListener('ready', onReady);
+        console.log(`🔍 Numéro trouvé par polling: ${client.info.wid.user}`);
+        resolve(client.info.wid.user);
+      }
+    }, 500);
+    
+    // Nettoyer l'intervalle au timeout
+    timeoutId.interval = checkInterval;
+  });
+}
+
+async function tryAlternativePhoneNumberMethods(client, phoneNumber) {
+  console.log(`🔄 Tentative méthodes alternatives pour ${phoneNumber}`);
+  
+  try {
+    // Méthode 1: Utiliser getMe() si disponible
+    if (typeof client.getMe === 'function') {
+      console.log(`🔍 Essai client.getMe()`);
+      try {
+        const me = await client.getMe();
+        if (me && me.id && me.id.user) {
+          console.log(`✅ Numéro via getMe: ${me.id.user}`);
+          return me.id.user;
+        }
+      } catch (e) {
+        console.log(`⚠️ getMe failed: ${e.message}`);
+      }
+    }
+    
+    // Méthode 2: Vérifier le localStorage via puppeteer
+    if (client.pupPage) {
+      console.log(`🌐 Lecture localStorage via page`);
+      try {
+        const userData = await client.pupPage.evaluate(() => {
+          // Essayer plusieurs méthodes
+          const store = window.Store;
+          if (store && store.Conn && store.Conn.me) {
+            return { source: 'Store', number: store.Conn.me.id.user };
+          }
+          if (window.WAPI && window.WAPI.getMyNumber) {
+            return { source: 'WAPI', number: window.WAPI.getMyNumber() };
+          }
+          
+          // Lire localStorage
+          const items = {};
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key.includes('user') || key.includes('wid') || key.includes('number')) {
+              try {
+                items[key] = JSON.parse(localStorage.getItem(key));
+              } catch {
+                items[key] = localStorage.getItem(key);
+              }
+            }
+          }
+          return { source: 'localStorage', items };
+        });
+        
+        console.log(`📊 Données page:`, JSON.stringify(userData, null, 2));
+        
+        if (userData.number) {
+          console.log(`✅ Numéro via page: ${userData.number}`);
+          return userData.number;
+        }
+        
+        // Chercher dans les items du localStorage
+        if (userData.items) {
+          for (const [key, value] of Object.entries(userData.items)) {
+            if (value && typeof value === 'object' && value.user) {
+              console.log(`🔍 Trouvé ${key}.user: ${value.user}`);
+              return value.user;
+            }
+            if (typeof value === 'string' && value.includes('@s.whatsapp.net')) {
+              const number = value.split('@')[0];
+              console.log(`🔍 Numéro dans string: ${number}`);
+              return number;
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`⚠️ Page evaluation failed: ${e.message}`);
+      }
+    }
+    
+    console.log(`❌ Aucune méthode alternative n'a fonctionné`);
+    return null;
+    
+  } catch (error) {
+    console.log(`❌ Erreur méthodes alternatives: ${error.message}`);
+    return null;
+  }
+}
 // 7️⃣ ENVOYER MESSAGE (version corrigée)
 // 7️⃣ ENVOYER MESSAGE (version ultra-simplifiée)
 app.post("/send", async (req, res) => {
@@ -613,7 +760,7 @@ app.get("/generate-qr/:user_id", async (req, res) => {
         phone_number: phoneNumber,
       };
     });
-    console.log("Generated QR result:", result);
+ 
     // 🆕 CORRECTION: Vérifier si result existe et a qrImage
     if (req.query.format === "html" && result && result.qrImage) {
       res.send(
