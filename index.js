@@ -238,13 +238,91 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
     const result = await queueUserRequest(userId, async () => {
       console.log(`🎯 Demande QR pour user ${userId}`);
 
-      // Générer un "phone number" basé sur le user ID + timestamp
+      // 🆕 D'ABORD VÉRIFIER SI L'UTILISATEUR A DÉJÀ UNE SESSION
+      const allSessions = scanAllSessions();
+      const userSessions = allSessions.filter((session) =>
+        session.phoneNumber.includes(`user_${userId}_`)
+      );
+
+      // 🆕 FILTRER SEULEMENT LES SESSIONS VALIDES (pas empty_folder)
+      const validSessions = userSessions.filter(session => 
+        session.status !== "empty_folder" && session.status !== "not_initialized"
+      );
+
+      let existingPhoneNumber = null;
+      let existingSessionStatus = null;
+
+      if (validSessions.length > 0) {
+        // 🆕 TROUVER LA SESSION LA PLUS RÉCENTE
+        const latestSession = validSessions.sort((a, b) => {
+          const getTimestamp = (phone) => {
+            const match = phone.match(/_(\d+)$/);
+            return match ? parseInt(match[1]) : 0;
+          };
+          return getTimestamp(b.phoneNumber) - getTimestamp(a.phoneNumber);
+        })[0];
+
+        existingPhoneNumber = latestSession.phoneNumber;
+        existingSessionStatus = latestSession.status;
+
+        console.log(`📱 Utilisateur ${userId} a déjà une session: ${existingPhoneNumber}`);
+        console.log(`📊 Statut de la session: ${existingSessionStatus}`);
+      }
+
+      // 🆕 CAS 1 : UTILISATEUR A DÉJÀ UNE SESSION AUTHENTIFIÉE
+      if (existingPhoneNumber && (existingSessionStatus === "authenticated" || existingSessionStatus === "qr_ready")) {
+        console.log(`🔄 Récupération de la session existante: ${existingPhoneNumber}`);
+        
+        // Récupérer le statut actuel
+        const currentStatus = getSenderStatus(existingPhoneNumber);
+        
+        if (currentStatus.ready && currentStatus.authenticated) {
+          // Session déjà prête et authentifiée
+          return {
+            status: "authenticated",
+            message: `WhatsApp déjà connecté sur cette session`,
+            ready: true,
+            user_id: userId,
+            phone_number: existingPhoneNumber,
+            session_already_exists: true,
+          };
+        } else if (currentStatus.hasQR) {
+          // Session avec QR en attente
+          console.log(`📱 QR déjà disponible pour ${existingPhoneNumber}`);
+          
+          // Charger la session en mémoire si pas déjà fait
+          if (!clientManager.clients.get(existingPhoneNumber)) {
+            console.log(`📥 Chargement session existante en mémoire...`);
+            await generateNewQRPhone(existingPhoneNumber);
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+          
+          // Récupérer le QR
+          const qrResult = await generateNewQR(existingPhoneNumber, userId);
+          
+          if (qrResult.qr) {
+            const qrImage = await QRCode.toDataURL(qrResult.qr);
+            return {
+              status: "qr_ready",
+              qrImage: qrImage,
+              qrRaw: qrResult.qr,
+              message: `Scannez ce QR pour connecter votre session WhatsApp`,
+              ready: false,
+              user_id: userId,
+              phone_number: existingPhoneNumber,
+              session_already_exists: true,
+            };
+          }
+        }
+      }
+
+      // 🆕 CAS 2 : UTILISATEUR N'A PAS DE SESSION OU SESSION INVALIDE
+      // Générer un nouveau numéro
       const phoneNumber = `user_${userId}_${Date.now()}`;
+      console.log(`🆕 Création nouvelle session: ${phoneNumber}`);
 
-      console.log(`📱 Génération QR avec numéro virtuel: ${phoneNumber}`);
-
-      // Générer le QR Code avec ce numéro virtuel
-      const qrResult = await generateNewQR(phoneNumber,userId);
+      // Générer le QR Code
+      const qrResult = await generateNewQR(phoneNumber, userId);
 
       if (qrResult.status === "authenticated") {
         return {
@@ -253,6 +331,7 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
           ready: true,
           user_id: userId,
           phone_number: phoneNumber,
+          session_already_exists: false,
         };
       }
 
@@ -270,6 +349,7 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
         ready: false,
         user_id: userId,
         phone_number: phoneNumber,
+        session_already_exists: false,
       };
     });
 
@@ -285,6 +365,48 @@ app.get("/user/:userId/generate-qr", async (req, res) => {
   }
 });
 
+// Route simple pour vérifier les handlers de signaux
+app.get("/debug/signal-handlers", (req, res) => {
+  const criticalSignals = ['SIGINT', 'SIGTERM', 'SIGUSR1', 'SIGUSR2'];
+  
+  const handlers = {};
+  
+  criticalSignals.forEach(signal => {
+    const listeners = process.listeners(signal);
+    handlers[signal] = {
+      count: listeners.length,
+      details: listeners.map((listener, index) => ({
+        index: index + 1,
+        name: listener.name || 'anonymous',
+        // Extraire une partie du code source pour identifier
+        source_preview: listener.toString()
+          .replace(/\s+/g, ' ')
+          .substring(0, 150)
+          .trim() + '...'
+      }))
+    };
+  });
+
+  // Vérifier si on a des doublons
+  const hasDuplicates = Object.values(handlers).some(info => info.count > 1);
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    has_duplicate_handlers: hasDuplicates,
+    warning: hasDuplicates ? '⚠️ ATTENTION: Signaux multiples détectés!' : '✅ OK: Pas de doublons',
+    handlers: handlers,
+    global_flags: {
+      __whatsappSignalHandlersInstalled: global.__whatsappSignalHandlersInstalled || false,
+      __whatsappAlreadySetup: global.__whatsappAlreadySetup || false,
+    },
+    process_info: {
+      pid: process.pid,
+      uptime: Math.round(process.uptime()) + 's',
+      listeners_SIGINT: process.listenerCount('SIGINT'),
+      listeners_SIGTERM: process.listenerCount('SIGTERM'),
+    }
+  });
+});
 /* The above code is an Express route handler that handles GET requests to retrieve phone sessions for
 a specific user ID. Here is a breakdown of what the code does: */
 app.get("/user/:userId/phones", async (req, res) => {
@@ -421,6 +543,9 @@ app.get("/user/:userId/phones", async (req, res) => {
     }
 
     console.log(`\n✅ ${finalSessions.length} sessions traitées pour user ${userId}`);
+
+    console.log(`\n📊 Résumé des sessions:`) ;
+    console.log(finalSessions)
 
     // Résumé
     const readySessions = finalSessions.filter((s) => s.ready && s.authenticated);

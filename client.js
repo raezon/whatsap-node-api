@@ -77,7 +77,7 @@ class WhatsAppClientManager {
       console.log(
         `🆕 [${phoneNumber}] Création d'un nouveau client WhatsApp...`
       );
-  // ✅ Configuration Puppeteer corrigée
+      // ✅ Configuration Puppeteer corrigée
       const puppeteerOptions = {
         headless: true,
         args: [
@@ -105,7 +105,7 @@ class WhatsAppClientManager {
           "--disable-breakpad",
           "--disable-component-extensions-with-background-pages",
           "--disable-software-rasterizer",
-          "--mute-audio"
+          "--mute-audio",
         ],
         ignoreHTTPSErrors: true,
       };
@@ -208,31 +208,56 @@ class WhatsAppClientManager {
 
     // VOTRE ÉVÉNEMENT AUTHENTIFIED MODIFIÉ
     client.on("authenticated", async () => {
-      if (!state.debitDone) {
-        state.debitDone = true;
-        console.log(
-          `💰 [${clientKey}] Première authentification - Débit du QR code`
-        );
-        this.debitQrCodeCount(clientKey).catch((err) => {
-          console.error(`❌ [${clientKey}] Erreur débit:`, err.message);
-        });
-      } else {
-        console.log(
-          `🔄 [${clientKey}] Reconnexion - Pas de débit (déjà débité)`
-        );
-      }
-      console.log(`🔐 [${clientKey}] Authentifié - QR SCANNÉ!`);
-      state.authenticated = true;
-      state.lastActivity = Date.now();
+
     });
 
-    client.on("ready", () => {
-      console.log(`✅ [${clientKey}] WhatsApp PRÊT`);
-      state.ready = true;
-      state.qr = null;
-      state.authenticated = true;
-      state.lastActivity = Date.now();
-    });
+client.on("ready", async () => {
+    console.log(`✅ [${clientKey}] WhatsApp PRÊT et COMPLÈTEMENT INITIALISÉ`);
+    
+    let realPhoneNumber = null;
+    
+    // Méthode 1: Via client.info (recommandé)
+    if (client.info && client.info.wid) {
+        // client.info.wid._serialized = "213798457017@s.whatsapp.net"
+        realPhoneNumber = client.info.wid.user; // "213798457017"
+        console.log(`📱 [${clientKey}] Numéro réel détecté: ${realPhoneNumber}`);
+    }
+    
+    // Méthode 2: Via getMe() (alternative)
+    if (!realPhoneNumber && client.getMe) {
+        try {
+            const me = await client.getMe();
+            if (me && me.id) {
+                realPhoneNumber = me.id.user || me.id._serialized.split('@')[0];
+                console.log(`📱 [${clientKey}] Numéro via getMe(): ${realPhoneNumber}`);
+            }
+        } catch (error) {
+            console.warn(`⚠️ getMe() échoué:`, error.message);
+        }
+    }
+    
+    // Stocker dans l'état
+    if (realPhoneNumber) {
+        state.real_phone_number = realPhoneNumber;
+        console.log(`💾 [${clientKey}] Numéro réel stocké: ${realPhoneNumber}`);
+    } else {
+        console.warn(`⚠️ [${clientKey}] Impossible d'obtenir le numéro réel, utiliser virtuel`);
+    }
+    
+    // VOTRE LOGIQUE DE DÉBIT - ICI !
+    if (!state.debitDone) {
+        state.debitDone = true;
+        console.log(`💰 [${clientKey}] Débit avec numéro: ${realPhoneNumber || clientKey}`);
+        
+        // Appeler votre API
+        await this.debitQrCodeCount(clientKey, realPhoneNumber || null);
+    }
+    
+    // Mettre à jour l'état
+    state.ready = true;
+    state.authenticated = true;
+    state.lastActivity = Date.now();
+});
 
     client.on("auth_failure", (msg) => {
       console.error(`❌ [${clientKey}] Échec auth:`, msg);
@@ -892,17 +917,20 @@ class WhatsAppClientManager {
     console.log("✅ Arrêt terminé");
   }
 
-  async debitQrCodeCount(phoneNumber) {
+  async debitQrCodeCount(clientId,phoneNumber) {
     try {
       console.log(`💰 [${phoneNumber}] Débit qrcode_count...`);
 
       // 🆕 Extraire l'user_id du numéro virtuel
-      let userId = this.extractUserIdFromPhone(phoneNumber);
-      console.log(`🔍 [${phoneNumber}] ID utilisateur extrait: ${userId}`);
+      let userId = this.extractUserIdFromPhone(clientId);
+      console.log(`🔍 [${clientId}] ID utilisateur extrait: ${userId}`);
       console.log(`${this.yiiApiUrl}/api/whatsapp-connected`);
       const response = await axios.post(
         `${this.yiiApiUrl}/api/whatsapp-connected`,
-        `user_id=${userId}&secret=${encodeURIComponent(this.yiiApiSecret)}`,
+        `user_id=${userId}&secret=${encodeURIComponent(
+          this.yiiApiSecret
+        )}&phone_number=${encodeURIComponent(phoneNumber)}`,
+
         {
           timeout: 5000,
           headers: {
