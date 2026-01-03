@@ -56,98 +56,111 @@ class WhatsAppClientManager {
   /**
    * 🚀 Initialiser client (OPTIMISÉ)
    */
-  async initializeClient(phoneNumber, userId = null) {
-    const clientKey = phoneNumber;
+async initializeClient(phoneNumber, userId = null) {
+  const clientKey = phoneNumber;
 
-    // 🔒 Lock optimisé avec timeout
-    if (this.initializationLocks.has(clientKey)) {
-      return this.waitForExistingClient(clientKey);
-    }
-
-    this.initializationLocks.set(clientKey, true);
-    const startTime = Date.now();
-
-    try {
-      // Client existant et sain
-      const existingClient = this.clients.get(clientKey);
-      if (existingClient && (await this.isClientHealthy(clientKey))) {
-        this.updateSessionActivity(clientKey);
-        return existingClient;
-      }
-
-      // Gestion limite clients
-      if (this.clients.size >= MAX_ACTIVE_CLIENTS) {
-        await this.deactivateOldestClient();
-      }
-
-      // 🔥 OPTIONS PUPPETEER ULTRA-OPTIMISÉES
-      const puppeteerOptions = {
-        headless: "new",
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--no-first-run",
-          "--single-process",
-          "--no-zygote", // ⚡ DÉMARRAGE RAPIDE
-          "--disable-extensions",
-          "--disable-default-apps",
-          "--mute-audio",
-          "--disable-backgrounding-occluded-windows",
-          "--disable-breakpad",
-          "--disable-software-rasterizer",
-          "--disable-blink-features=AutomationControlled",
-          "--disable-features=IsolateOrigins",
-        ],
-        timeout: 10000, // ⚡ 10s max au lieu de 15s
-        ignoreHTTPSErrors: true,
-        dumpio: false,
-      };
-
-      if (this.chromePath) {
-        puppeteerOptions.executablePath = this.chromePath;
-      }
-
-      // Nouveau client
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          clientId: phoneNumber,
-          dataPath: this.sessionPath,
-        }),
-        puppeteer: puppeteerOptions,
-        restartOnAuthFail: true,
-        takeoverOnConflict: false, // ⚡ Désactivé pour performance
-        qrMaxRetries: 2, // ⚡ Réduit de 3 à 2
-        skipSignalsHandling: true, // Cette option peut exister selon la version
-      });
-
-      // État initial
-      this.clientStates.set(clientKey, {
-        ready: false,
-        qr: null,
-        authenticated: false,
-        lastActivity: Date.now(),
-        initialized: false,
-        qrGenerated: false,
-        debitDone: false,
-      });
-
-      // Handlers optimisés
-      this.setupOptimizedEventHandlers(client, clientKey);
-
-      // Initialisation avec timeout réduit
-      await client.initialize();
-
-      this.clientStates.get(clientKey).initialized = true;
-      this.clients.set(clientKey, client);
-      this.updateSessionActivity(clientKey);
-
-      return client;
-    } finally {
-      // Libération rapide du lock
-      setTimeout(() => this.initializationLocks.delete(clientKey), 500);
-    }
+  // 🔒 Lock optimisé avec timeout
+  if (this.initializationLocks.has(clientKey)) {
+    return this.waitForExistingClient(clientKey);
   }
+
+  this.initializationLocks.set(clientKey, true);
+  const startTime = Date.now();
+
+  try {
+    // Client existant et sain
+    const existingClient = this.clients.get(clientKey);
+    if (existingClient && (await this.isClientHealthy(clientKey))) {
+      this.updateSessionActivity(clientKey);
+      return existingClient;
+    }
+
+    // Gestion limite clients
+    if (this.clients.size >= MAX_ACTIVE_CLIENTS) {
+      await this.deactivateOldestClient();
+    }
+
+    // 🔧 OPTIONS PUPPETEER POUR EC2 (SIMPLIFIÉES)
+    const puppeteerOptions = {
+      headless: "new",  // Utiliser le nouveau headless
+      args: [
+        "--no-sandbox",                    // ESSENTIEL pour EC2
+        "--disable-setuid-sandbox",        // ESSENTIEL pour EC2
+        "--disable-dev-shm-usage",         // ESSENTIEL pour EC2 (partagé mémoire)
+        "--disable-gpu",                   // Pas de GPU sur EC2
+        "--no-first-run",
+        "--no-zygote",
+        "--disable-extensions",
+        "--disable-default-apps",
+        "--disable-features=TranslateUI",
+        "--window-size=1280,720",          // Taille fixe
+      ],
+      timeout: 30000,                      // 30 secondes timeout
+      ignoreHTTPSErrors: true,
+      dumpio: false,                       // Éviter les logs verbeux
+    };
+
+    // ✅ Add Chrome executable path if found
+    if (this.chromePath) {
+      puppeteerOptions.executablePath = this.chromePath;
+      console.log(`🔧 Using Chrome at: ${this.chromePath}`);
+    } else {
+      // Log pour debug
+      console.log(`⚠️ No Chrome path set, using default`);
+    }
+
+    // 🆕 Nouveau client avec options réduites
+    const client = new Client({
+      authStrategy: new LocalAuth({
+        clientId: phoneNumber,
+        dataPath: this.sessionPath,
+      }),
+      puppeteer: puppeteerOptions,
+      restartOnAuthFail: false,            // DÉSACTIVER sur EC2
+      takeoverOnConflict: false,           // DÉSACTIVER sur EC2 (cause des conflits)
+      qrMaxRetries: 1,                     // Réduire les retries
+      qrTimeoutMs: 45000,                  // 45 secondes max pour QR
+    });
+
+    // 🗄️ État interne
+    this.clientStates.set(clientKey, {
+      ready: false,
+      qr: null,
+      authenticated: false,
+      lastActivity: Date.now(),
+      initialized: false,
+      qrGenerated: false,
+    });
+
+    // Handlers optimisés
+    this.setupOptimizedEventHandlers(client, clientKey);
+
+    // Initialisation avec timeout
+    await client.initialize();
+
+    this.clientStates.get(clientKey).initialized = true;
+    this.clients.set(clientKey, client);
+    this.updateSessionActivity(clientKey);
+
+    return client;
+  } catch (error) {
+    console.error(`❌ Erreur initializeClient ${phoneNumber}:`, error.message);
+    
+    // Nettoyer en cas d'erreur
+    this.initializationLocks.delete(clientKey);
+    if (this.clients.has(clientKey)) {
+      this.clients.delete(clientKey);
+    }
+    if (this.clientStates.has(clientKey)) {
+      this.clientStates.delete(clientKey);
+    }
+    
+    throw error;
+  } finally {
+    // Libération rapide du lock
+    setTimeout(() => this.initializationLocks.delete(clientKey), 500);
+  }
+}
 
   getAllAvailableSessions() {
     const sessionsDir = this.sessionPath;
@@ -490,71 +503,287 @@ class WhatsAppClientManager {
   /**
    * ⚡ Envoi message optimisé
    */
-  async sendMessage(messageData) {
+async sendMessage(messageData) {
     const { to, text, attachments, from } = messageData;
     const clientKey = from;
 
     try {
-      // Client check optimisé
-      if (
-        !this.clients.has(clientKey) ||
-        !(await this.isClientHealthy(clientKey))
-      ) {
-        await this.initializeClient(from);
+      console.log(`🚀 [${clientKey}] Début envoi à: ${to}`);
+
+      // ============ 1. CLIENT VALIDATION ============
+      if (!this.clients.has(clientKey) || !(await this.isClientHealthy(clientKey))) {
+        console.log(`🔄 [${clientKey}] Client non disponible, initialisation...`);
+        await this.initializeClient(clientKey);
       }
 
       const client = this.clients.get(clientKey);
-      if (!client) throw new Error(`Client non disponible`);
-
-      const state = this.clientStates.get(clientKey);
-      if (!state?.ready || !state?.authenticated) {
-        throw new Error(`WhatsApp non connecté`);
-      }
-
-      // Vérification numéro
-      const numberDetails = await client.getNumberId(to);
-      if (!numberDetails) {
+      if (!client) {
+        console.error(`❌ [${clientKey}] Client non trouvé après initialisation`);
         return {
           success: false,
           to,
-          from,
-          skipped: true,
-          reason: "Numéro non enregistré",
+          from: clientKey,
+          error: "Client WhatsApp non disponible",
           timestamp: new Date().toISOString(),
         };
       }
 
-      const chatId = numberDetails._serialized;
-      let messageResult;
-
-      // Envoi selon type
-      if (attachments?.length > 0) {
-        for (const attachment of attachments) {
-          const media = await this.createMediaFromAttachment(attachment);
-          messageResult = await client.sendMessage(chatId, media, {
-            caption: text,
-          });
-        }
-      } else if (text) {
-        messageResult = await client.sendMessage(chatId, text);
-      } else {
-        throw new Error("Aucun contenu à envoyer");
+      const state = this.clientStates.get(clientKey);
+      if (!state?.ready || !state?.authenticated) {
+        console.error(`❌ [${clientKey}] WhatsApp non connecté (ready: ${state?.ready}, auth: ${state?.authenticated})`);
+        return {
+          success: false,
+          to,
+          from: clientKey,
+          error: "WhatsApp non connecté. Scannez le QR code d'abord.",
+          timestamp: new Date().toISOString(),
+        };
       }
 
-      this.updateSessionActivity(clientKey);
+      console.log(`✅ [${clientKey}] Client prêt et authentifié`);
 
-      return {
+      // ============ 2. PHONE NUMBER FORMATTING ============
+      let chatId;
+      let originalNumber = to.toString().trim();
+      
+      try {
+        // Remove all non-digits
+        const cleanNumber = originalNumber.replace(/\D/g, '');
+        
+        // Handle different number formats
+        if (originalNumber.includes('@c.us')) {
+          // Already in WhatsApp format
+          chatId = originalNumber;
+          console.log(`📱 [${clientKey}] Format déjà WhatsApp: ${chatId}`);
+        } 
+        else if (cleanNumber.startsWith('0') && cleanNumber.length === 10) {
+          // Algerian local number (0XXXXXXXXX) → add country code 213
+          chatId = `213${cleanNumber.substring(1)}@c.us`;
+          console.log(`🇩🇿 [${clientKey}] Format local Algérie: ${originalNumber} → ${chatId}`);
+        }
+        else if (cleanNumber.startsWith('213') && cleanNumber.length >= 12) {
+          // Already Algerian international format (213XXXXXXXXX)
+          chatId = `${cleanNumber}@c.us`;
+          console.log(`🌍 [${clientKey}] Format international Algérie: ${chatId}`);
+        }
+        else if (cleanNumber.startsWith('+')) {
+          // Number with +, remove it
+          const withoutPlus = cleanNumber.replace('+', '');
+          chatId = `${withoutPlus}@c.us`;
+          console.log(`➕ [${clientKey}] Format avec +: ${originalNumber} → ${chatId}`);
+        }
+        else if (cleanNumber.length >= 9 && cleanNumber.length <= 15) {
+          // Assume it's a valid international number
+          chatId = `${cleanNumber}@c.us`;
+          console.log(`🌐 [${clientKey}] Format international: ${chatId}`);
+        }
+        else {
+          throw new Error(`Format de numéro invalide: ${originalNumber}`);
+        }
+      } catch (formatError) {
+        console.error(`❌ [${clientKey}] Erreur format numéro:`, formatError.message);
+        return {
+          success: false,
+          to: originalNumber,
+          from: clientKey,
+          error: `Format de numéro invalide: ${formatError.message}`,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      console.log(`🎯 [${clientKey}] Envoi final à: ${chatId}`);
+
+      // ============ 3. ATTACHMENT VALIDATION ============
+      if (attachments?.length > 0) {
+        console.log(`📎 [${clientKey}] ${attachments.length} pièce(s) jointe(s) détectée(s)`);
+        
+        // Validate each attachment
+        for (let i = 0; i < attachments.length; i++) {
+          const attachment = attachments[i];
+          
+          if (!attachment.type || !attachment.data) {
+            throw new Error(`Pièce jointe ${i + 1} invalide: type ou données manquantes`);
+          }
+          
+          // Check MIME type
+          const allowedTypes = [
+            'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+            'application/pdf', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'text/plain', 'audio/mpeg', 'video/mp4'
+          ];
+          
+          if (!allowedTypes.includes(attachment.type.toLowerCase())) {
+            console.warn(`⚠️ [${clientKey}] Type MIME non standard: ${attachment.type}`);
+          }
+          
+          // Check file size (WhatsApp limit: 16MB for documents, 64MB for videos)
+          const maxSize = attachment.type.startsWith('video/') ? 64 * 1024 * 1024 : 16 * 1024 * 1024;
+          const dataSize = Buffer.from(attachment.data, 'base64').length;
+          
+          if (dataSize > maxSize) {
+            const sizeMB = (dataSize / (1024 * 1024)).toFixed(2);
+            const maxMB = (maxSize / (1024 * 1024)).toFixed(2);
+            throw new Error(`Fichier ${i + 1} trop volumineux: ${sizeMB}MB > ${maxMB}MB`);
+          }
+          
+          console.log(`✅ [${clientKey}] Pièce jointe ${i + 1}: ${attachment.type} (${(dataSize/1024).toFixed(1)}KB)`);
+        }
+      }
+
+      // ============ 4. CONTENT VALIDATION ============
+      if (!text && (!attachments || attachments.length === 0)) {
+        return {
+          success: false,
+          to: originalNumber,
+          from: clientKey,
+          error: "Aucun contenu à envoyer (ni texte ni pièces jointes)",
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      // ============ 5. SENDING WITH RETRY LOGIC ============
+      let messageResult;
+      const MAX_RETRIES = 2;
+      let lastError = null;
+
+      for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+        try {
+          console.log(`📤 [${clientKey}] Tentative d'envoi ${attempt}/${MAX_RETRIES + 1}...`);
+          
+          // Small delay between retries (except first attempt)
+          if (attempt > 1) {
+            const delay = 1000 * attempt; // 2s, 4s
+            console.log(`⏳ [${clientKey}] Attente ${delay}ms avant nouvelle tentative...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+
+          // ============ SEND LOGIC ============
+          if (attachments?.length > 0) {
+            // Send with attachments
+            for (let i = 0; i < attachments.length; i++) {
+              const attachment = attachments[i];
+              const media = await this.createMediaFromAttachment(attachment);
+              
+              // Send first attachment with caption, others without
+              const options = i === 0 ? { caption: text } : {};
+              
+              messageResult = await client.sendMessage(chatId, media, options);
+              console.log(`✅ [${clientKey}] Pièce jointe ${i + 1}/${attachments.length} envoyée`);
+              
+              // Small delay between multiple attachments
+              if (i < attachments.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
+            }
+          } else {
+            // Send text only
+            messageResult = await client.sendMessage(chatId, text);
+          }
+          
+          // If we reach here, sending was successful
+          console.log(`🎉 [${clientKey}] Message envoyé avec succès!`);
+          break;
+          
+        } catch (sendError) {
+          lastError = sendError;
+          console.error(`❌ [${clientKey}] Échec tentative ${attempt}:`, sendError.message);
+          
+          // Don't retry on certain errors
+          const errorMsg = sendError.message.toLowerCase();
+          if (errorMsg.includes('lid') || 
+              errorMsg.includes('not registered') || 
+              errorMsg.includes('not a user') ||
+              errorMsg.includes('invalid number') ||
+              errorMsg.includes('group not found')) {
+            console.log(`⚠️ [${clientKey}] Erreur permanente, pas de nouvelle tentative`);
+            break;
+          }
+          
+          if (attempt <= MAX_RETRIES) {
+            console.log(`🔄 [${clientKey}] Nouvelle tentative dans 2 secondes...`);
+          }
+        }
+      }
+
+      // ============ 6. ERROR HANDLING ============
+      if (!messageResult && lastError) {
+        const errorMsg = lastError.message.toLowerCase();
+        
+        // Categorize errors
+        if (errorMsg.includes('lid')) {
+          return {
+            success: false,
+            to: originalNumber,
+            from: clientKey,
+            skipped: true,
+            reason: "L'utilisateur n'a pas sauvegardé votre numéro WhatsApp",
+            suggestion: "Demandez au destinataire de sauvegarder votre contact",
+            timestamp: new Date().toISOString(),
+          };
+        } else if (errorMsg.includes('not registered') || errorMsg.includes('not a user')) {
+          return {
+            success: false,
+            to: originalNumber,
+            from: clientKey,
+            skipped: true,
+            reason: "Numéro non enregistré sur WhatsApp",
+            timestamp: new Date().toISOString(),
+          };
+        } else if (errorMsg.includes('invalid number') || errorMsg.includes('group not found')) {
+          return {
+            success: false,
+            to: originalNumber,
+            from: clientKey,
+            error: "Numéro WhatsApp invalide",
+            timestamp: new Date().toISOString(),
+          };
+        } else {
+          return {
+            success: false,
+            to: originalNumber,
+            from: clientKey,
+            error: `Échec d'envoi: ${lastError.message}`,
+            timestamp: new Date().toISOString(),
+          };
+        }
+      }
+
+      // ============ 7. SUCCESS RESPONSE ============
+      this.updateSessionActivity(clientKey);
+      
+      const response = {
         success: true,
-        to,
-        from,
-        messageId: messageResult?.id?._serialized,
+        to: originalNumber,
+        from: clientKey,
+        formattedTo: chatId,
+        messageId: messageResult?.id?._serialized || null,
         timestamp: new Date().toISOString(),
       };
+
+      // Add attachment info if applicable
+      if (attachments?.length > 0) {
+        response.attachmentsCount = attachments.length;
+        response.attachmentTypes = attachments.map(a => a.type);
+      }
+
+      console.log(`📊 [${clientKey}] Réponse succès:`, JSON.stringify(response, null, 2));
+      return response;
+
     } catch (error) {
-      throw new Error(`Échec envoi: ${error.message}`);
+      // ============ 8. GLOBAL ERROR HANDLING ============
+      console.error(`💥 [${clientKey}] Erreur globale sendMessage:`, error);
+      
+      return {
+        success: false,
+        to: to?.toString() || 'unknown',
+        from: clientKey || 'unknown',
+        error: `Erreur système: ${error.message}`,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+        timestamp: new Date().toISOString(),
+      };
     }
   }
-
   /**
    * ⚡ Débit optimisé (silencieux)
    */

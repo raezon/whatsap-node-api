@@ -808,6 +808,64 @@ app.post("/send", async (req, res) => {
     }
   }
 });
+
+
+// ============ ADD THIS DEBUG ENDPOINT ============
+app.post('/test-send', async (req, res) => {
+  try {
+    const { to, from } = req.body;
+    const clientKey = from || 'user_3_1765664758492';
+    
+    console.log(`[TEST] Test send to: ${to} from: ${clientKey}`);
+    
+    // Make sure clientManager is available (NOT whatsappManager)
+    if (!clientManager) {
+      return res.json({
+        success: false,
+        error: "clientManager not initialized"
+      });
+    }
+    
+    // Get client directly
+    const client = clientManager.clients.get(clientKey);
+    if (!client) {
+      return res.json({
+        success: false,
+        error: `Client ${clientKey} not found. Available clients: ${Array.from(clientManager.clients.keys()).join(', ')}`
+      });
+    }
+    
+    // Test connection state
+    const state = clientManager.clientStates.get(clientKey);
+    console.log(`[TEST] Client state:`, state);
+    
+    // Format number
+    const cleanNumber = to.toString().replace(/\D/g, '');
+    const chatId = `${cleanNumber}@c.us`;
+    
+    console.log(`[TEST] Formatted chatId: ${chatId}`);
+    
+    // Simple test message
+    const result = await client.sendMessage(chatId, 'Test message from debug endpoint');
+    
+    res.json({
+      success: true,
+      messageId: result.id._serialized,
+      chatId,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('[TEST] Error:', error);
+    res.json({
+      success: false,
+      error: error.message,
+      errorType: error.constructor.name,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+// ============ END DEBUG ENDPOINT ============
 // 4️⃣ STATUT DES SESSIONS D'UN USER
 app.get("/user/:userId/sessions", async (req, res) => {
   const { userId } = req.params;
